@@ -118,9 +118,22 @@ written:
     stable unique refund reference. It increments the linked overpayment's
     `refunded_amount`, appends an `overpayment_refund` repayment-ledger row, and
     does not alter the loan. The overpayment remains `active` until its ledger
-    balance reaches zero, then becomes `refunded`. Refund initiation may remain
-    external; its authenticated webhook result is processed here.
-13. Every callback attempt creates an append-only `webhook_deliveries` fact,
+    balance reaches zero, then becomes `refunded`. A true refund is distinct
+    from `transaction.reversal`: it must never compensate a repayment component
+    or reopen a loan.
+13. For the timeboxed core-banking demo, a newly created core-banking
+    overpayment writes an `overpayment.refund.requested.v1` outbox command. The
+    outbox worker POSTs a signed, provider-native test callback to this service's
+    own `POST /webhooks/payments/core_banking` route using
+    `event: overpayment.refunded`, a new `notification_id`, the original
+    payment's `original_notification_id`, and the requested refund amount. The
+    core-banking normalizer maps that label to canonical `transaction.refund`.
+    This loopback is a test double for the documented outbound core-banking
+    refund API that production will call; it is not a claim that production
+    providers accept inbound webhooks from us. The initial scope is limited to
+    overpayments whose original credit is also from `core_banking`, because the
+    current refund correlation requires the same provider and merchant scope.
+14. Every callback attempt creates an append-only `webhook_deliveries` fact,
     including payment, reversal, refund, pending, failed, duplicate, malformed,
     and invalid-signature attempts. Only authenticated, safely parsed deliveries
     may link to canonical financial events; unsafe bodies are represented by a
@@ -459,9 +472,12 @@ app/
   adapters/providers/nibss_gsi.py
   adapters/providers/core_banking.py
   adapters/persistence/sqlalchemy_repositories.py
+  adapters/messaging/core_banking_refund_http.py
   infrastructure/crypto.py
   infrastructure/secure_xml.py
   infrastructure/redis_idempotency.py
+  workers/outbox_publisher.py
+  workers/lookup_retry_runner.py
 ```
 
 Tasks:
@@ -526,10 +542,13 @@ result; it must not import FastAPI or accept `Request`, `Response`, `Depends`,
 `HTTPException`, headers, or HTTP status codes. The controller maps domain
 rejections to the provider-specific HTTP acknowledgement.
 
-Reconciliation remains synchronous in this implementation. Only outbox
-publication runs in a worker. A future queue consumer may become another driving
-adapter that invokes the same use case, but it is not part of the selected
-request flow and must not introduce a second reconciliation implementation.
+Reconciliation remains synchronous in this implementation. The outbox publisher
+and lookup-retry runner are independent driving adapters: neither writes a loan,
+ledger, payment event, or overpayment projection directly. The outbox publisher
+only delivers a committed command and the lookup runner invokes the same
+`ReconcilePaymentUseCase` as the HTTP controller. A future queue consumer may
+become another driving adapter, but it must not introduce a second
+reconciliation implementation.
 
 Within the transaction, use this lock order consistently:
 
@@ -636,33 +655,49 @@ sequenceDiagram
     end
 ```
 
-The lease prevents two admins from performing the same lookup concurrently and
-expires after a crashed attempt. A later scheduled worker could invoke this same
-retry command, but automatic retry execution is not required for the current
-scope.
+The lease prevents two admins or the scheduled `lookup_retry_runner` from
+performing the same lookup concurrently and expires after a crashed attempt.
+Both drivers use the same retry application service; automatic execution must
+not duplicate the admin controller's reconciliation logic.
 
 Exit criteria: transaction-level acceptance and concurrency tests prove all
 financial invariants on PostgreSQL.
 
-### Milestone 4 - Publish stable downstream events
+### Milestone 4 - Publish core-banking overpayment refunds through the outbox
 
 Tasks:
 
-- Write `payment.reconciled.v1`, `payment.reversed.v1`, or
-  `overpayment.refunded.v1` to the outbox in the same transaction, selected by
-  event kind. Use one versioned envelope containing current/original event,
-  provider, loan and overpayment identifiers; currency; gross and component
-  amounts; signed loan/overpayment deltas; outcome/reason; occurrence time; and
-  correlation ID. Exclude secrets and raw provider payload, and serialize every
-  `Decimal` as a fixed-point string.
-- Implement a retrying outbox publisher with exponential backoff, idempotent
-  message ID equal to the outbox row ID, publication timestamp, attempt count,
-  and dead-letter alerting.
-- Make downstream consumers idempotent on the message ID. Database commit is not
-  rolled back because a broker is unavailable.
+- When a core-banking credit creates an overpayment, insert one
+  `overpayment.refund.requested.v1` outbox row in the same transaction. Its
+  fixed-point JSON envelope contains the outbox ID/message ID, the originating
+  payment and overpayment IDs/references, merchant scope, currency, remaining
+  refund amount, and correlation ID; exclude secrets and raw payloads.
+- Extend outbox persistence with `status`, `available_at`, `lease_until`,
+  `lease_owner`, `attempts`, `last_error`, and `published_at`; index due,
+  unpublished rows. Claims use PostgreSQL row locking with `SKIP LOCKED`.
+- Implement `app/workers/outbox_publisher.py` as a separately deployable polling
+  process. It claims a bounded batch in a short transaction, POSTs outside that
+  transaction, then records success or a redacted failure in a new transaction.
+  Worker crashes are recovered by lease expiry; failures use bounded exponential
+  backoff and eventually create a visible operational issue/dead-letter alert.
+- Implement `CoreBankingRefundHttpPublisher` as the demo delivery adapter. It
+  sends the configured internal token and a JSON callback to
+  `/webhooks/payments/core_banking` with `event: overpayment.refunded` and a
+  unique notification ID derived from the outbox event. A `200` response whose
+  reconciliation result is `applied` completes the outbox row. A business
+  rejection is terminal and opens an issue; transport/`5xx` failures retry.
+- Do not use `payment.reversed` / `transaction.reversal` for this flow. Those
+  actions compensate the original credit's repayment components and can reopen a
+  loan. The loopback's provider-native `overpayment.refunded` label must
+  normalize to `transaction.refund`, which changes only the overpayment balance.
+- The loopback target is a local test double. In production this adapter is
+  replaced by the documented core-banking outbound refund API; the durable
+  command, idempotency key, retry, and confirmation semantics remain unchanged.
 
-Exit criteria: broker outage leaves committed unpublished rows; recovery drains
-them exactly once from the consumer's perspective.
+Exit criteria: a core-banking overpayment commits exactly one refund command;
+the worker redelivers it safely after failure; its signed loopback refund appends
+one refund ledger row without changing the loan; and duplicate worker delivery
+cannot produce a second refund.
 
 ### Milestone 5 - Build the admin reconciliation and issues panel
 
@@ -800,6 +835,9 @@ data.
 | Partial/duplicate/already-reversed reversal | Unsupported partial is quarantined; exact duplicate replays; a second distinct full reversal is rejected |
 | Partial overpayment refund | New refund event and `overpayment_refund` ledger row; `refunded_amount` increases; status remains `active`; no loan change |
 | Final overpayment refund | New refund event and ledger row consume remaining amount; status becomes `refunded`; no loan change |
+| Core-banking refund loopback | A committed core-banking overpayment creates one refund-request outbox command; the worker posts signed `overpayment.refunded` with a unique notification ID and the original notification ID; reconciliation appends one refund row and leaves the loan unchanged |
+| Duplicate core-banking refund delivery | The same outbox command/callback reference replays idempotently; no second ledger row or refund projection change |
+| Outbox transport failure or worker crash | Refund command remains unpublished or its expired lease becomes claimable; loan and overpayment remain unchanged until a successful authenticated refund callback |
 | Refund exceeds remaining or mismatches original/provider/currency | Quarantined with reason; no financial mutation |
 | Pending/failed reversal or refund callback | Delivery/operational fact only; no financial mutation |
 | Audit/outbox insert failure | Entire financial transaction rolls back |
@@ -875,7 +913,9 @@ leave explicit seams, rather than provide four superficial provider branches.
 - one authenticated reversal fixture that appends a compensating ledger row and
   one overpayment-refund fixture that appends a ledger row and updates only the
   overpayment projection, not the loan;
-- durable lookup-retry tasks plus an authorized, audited admin retrigger path;
+- a durable outbox worker that drives the signed core-banking refund loopback
+  for core-banking overpayments, plus durable lookup-retry tasks with both an
+  authorized, audited admin retrigger path and a lease-safe scheduled runner;
 - focused PostgreSQL money and race tests; SQLite, if retained, is used only for
   non-authoritative smoke tests; and
 - an issues-first dashboard using server-side summary/issue data.
@@ -884,7 +924,8 @@ leave explicit seams, rather than provide four superficial provider branches.
 
 - real Fincra, NIBSS GSI, and lender/core-banking contracts;
 - encrypted provider configuration with vault/KMS injection and rotation;
-- Redis completed-idempotency-result cache, transactional outbox and publisher;
+- Redis completed-idempotency-result cache and replacement of the demo
+  core-banking loopback adapter with the real outbound refund API;
 - full GSI/source-account mapping and operator resolution workflow;
 - retention/redaction controls, alerts, runbooks, and production load/failure
   testing.

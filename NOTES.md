@@ -106,3 +106,60 @@ domain receives one canonical namespaced event kind.
 - The one-to-two-day slice should demonstrate one complete provider path and the
   core correctness guarantees. Remaining provider integrations and production
   hardening should be explicit follow-up work rather than superficial stubs.
+
+## The implementation
+
+### My part
+
+I implemented the planned package boundaries and reconciliation slice. The
+FastAPI transport is now separated into API controllers, the application use
+case, domain DTOs/enums, repository and provider ports, SQLAlchemy adapters,
+and provider-specific adapters. The implementation includes provider-routed
+webhooks, authenticated mock/core-banking paths, canonical normalization,
+payment/reversal/refund reconciliation, append-only repayment components,
+overpayment projections, durable idempotency, audit records, reconciliation
+issues, provider-lookup retry records, paginated staff admin endpoints, Alembic
+migrations, and a Docker/PostgreSQL deployment configuration.
+
+### Assistance gotten from AI
+
+AI helped translate the ADR and implementation plan into concrete package
+boundaries, repository interfaces, migrations, provider adapter templates,
+reconciliation tests, and the Docker/Alembic setup. It also helped identify the
+transactional outbox and lookup-retry records as durable seams for later
+background processing.
+
+### How I steered it
+
+I kept the financial reconciliation decision synchronous in the webhook request
+and restricted asynchronous processing to non-financial follow-up work. I used
+the existing SQLAlchemy models as persistence projections while keeping domain
+money and canonical-event concepts separate. I added mock and core-banking
+adapters as demonstrable provider paths, without presenting them as verified
+production integrations, and kept the initial staff retry action manual and
+audited.
+
+### Key decisions and lender-production flags
+
+- The webhook controller authenticates and normalizes provider input before it
+  invokes `ReconcilePaymentUseCase`; persistence remains behind the unit-of-work
+  and repository ports.
+- The `outbox_events` table and `provider_lookup_retries` table are durable
+  integration points, but neither has an automatic worker yet. The first worker
+  should publish committed outbox rows; a later, separately controlled worker
+  may claim and run due provider-lookup retries.
+- Financial reconciliation must remain request-time and transactionally
+  authoritative. A worker must never independently re-apply, reverse, or refund
+  a payment without using the same idempotent use case and database locks.
+- `requirements.txt` is intentionally retained for this small, timeboxed
+  FastAPI service. Poetry is optional tooling, not a correctness improvement;
+  adopting it should include a committed lock file and aligned Docker/local
+  commands rather than keeping two competing dependency sources of truth.
+- The root `app/` modules are transitional framework/persistence composition
+  code: `main.py` remains the composition root; `db.py` and `models.py` belong
+  under the SQLAlchemy persistence adapter; `audit.py` belongs with persistence;
+  `auth.py` belongs with inbound authentication; `dependencies.py` belongs to
+  the API layer; and `seed.py` belongs in an operational/scripts package.
+- Before lender production, implement and operate the outbox publisher, retry
+  scheduling/leases, real provider contract verification, secret management,
+  PostgreSQL concurrency coverage, monitoring, and recovery runbooks.

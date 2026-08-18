@@ -1,0 +1,80 @@
+name: credithub
+
+services:
+  db:
+    image: postgres:${POSTGRES_VERSION:-17-alpine}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-credithub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-credithub}
+      POSTGRES_DB: ${POSTGRES_DB:-credithub}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrations:
+    build:
+      context: ..
+      dockerfile: build/docker/Dockerfile
+      target: api
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-credithub}:${POSTGRES_PASSWORD:-credithub}@db:5432/${POSTGRES_DB:-credithub}"
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["/usr/local/bin/run-migrations"]
+    restart: "no"
+
+  seed:
+    build:
+      context: ..
+      dockerfile: build/docker/Dockerfile
+      target: api
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-credithub}:${POSTGRES_PASSWORD:-credithub}@db:5432/${POSTGRES_DB:-credithub}"
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.seed"]
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: build/docker/Dockerfile
+      target: api
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-credithub}:${POSTGRES_PASSWORD:-credithub}@db:5432/${POSTGRES_DB:-credithub}"
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-secret}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    ports:
+      - "${API_PORT:-8137}:8137"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8137/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: build/docker/Dockerfile
+      target: frontend
+      args:
+        VITE_DEV_WEBHOOK_TOKEN: ${VITE_DEV_WEBHOOK_TOKEN:-dev-webhook-secret}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-5137}:80"
+
+volumes:
+  postgres_data:

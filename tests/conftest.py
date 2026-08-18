@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import Base, SessionLocal, engine
+from app.dependencies import set_session_factory
 from app.main import app
 from app.models import Loan, LoanStatus
 
@@ -22,4 +23,8 @@ def client():
     ])
     db.commit()
     db.close()
+    
+    # Initialize session factory for dependency injection
+    set_session_factory(SessionLocal)
+    
     return TestClient(app)

@@ -12,6 +12,7 @@ export default defineConfig({
       "/payment-events": "http://localhost:8137",
       "/webhooks": "http://localhost:8137",
       "/health": "http://localhost:8137",
+      "/admin": "http://localhost:8137",
     },
   },
 });

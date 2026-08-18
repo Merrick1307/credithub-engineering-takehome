@@ -19,6 +19,7 @@ def record_audit(
     entity_id,
     actor: str,
     detail: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     db.add(
         AuditLog(
@@ -27,5 +28,6 @@ def record_audit(
             entity_id=str(entity_id),
             actor=actor,
             detail=detail,
+            correlation_id=correlation_id,
         )
     )
