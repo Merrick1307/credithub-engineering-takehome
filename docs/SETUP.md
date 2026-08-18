@@ -33,7 +33,7 @@ One command run:
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m app.seed
+.venv/bin/python -m app.scripts.seed
 .venv/bin/uvicorn app.main:app --port 8137
 ```
 

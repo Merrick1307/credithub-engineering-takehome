@@ -124,9 +124,14 @@ class PaymentWebhookController:
         """Write a sanitized delivery fact after its financial transaction commits."""
         session = self.uow.session_factory()
         try:
+            delivery_status = (
+                "duplicate" if result.idempotent_replay
+                else "accepted" if result.status.value != "rejected"
+                else "non_actionable"
+            )
             session.add(WebhookDelivery(
                 provider=provider,
-                delivery_status="accepted" if result.status.value != "rejected" else "non_actionable",
+                delivery_status=delivery_status,
                 payload_digest=hashlib.sha256(raw_body).hexdigest(),
                 payment_event_id=result.event_id,
                 correlation_id=correlation_id,

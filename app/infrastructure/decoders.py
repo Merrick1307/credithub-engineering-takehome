@@ -22,7 +22,7 @@ class SimpleJsonDecoder(ProviderDecoder):
             raise ValueError(f"Unsupported content type: {content_type}")
         
         try:
-            data = json.loads(raw_body.decode("utf-8"))
+            data = json.loads(raw_body.decode("utf-8"), parse_float=Decimal)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise ValueError(f"Invalid JSON: {e}")
         

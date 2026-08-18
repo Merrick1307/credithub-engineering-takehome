@@ -1,458 +1,3 @@
-// import React, { useCallback, useEffect, useState } from "react";
-// import "./styles.css";
-// const money = new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN" });
-// async function read(response) {
-//   if (response.ok) return response.json();
-//   let detail = `HTTP ${response.status}`;
-//   try { detail = (await response.json()).detail || detail; } catch { /* response was not JSON */ }
-//   throw new Error(detail);
-// }
-// function usePage(endpoint, token, active, limit) {
-//   const [items, setItems] = useState([]), [cursor, setCursor] = useState(null), [loading, setLoading] = useState(false);
-//   const request = useCallback(async (next, reset = false) => { if (!active || loading) return; setLoading(true); try { const sep = endpoint.includes("?") ? "&" : "?"; const data = await read(await fetch(`${endpoint}${sep}limit=${limit}${next ? `&cursor=${encodeURIComponent(next)}` : ""}`, { headers: token ? { "X-Admin-Token": token } : {} })); setItems(old => reset ? data.items : [...old, ...data.items]); setCursor(data.next_cursor); } finally { setLoading(false); } }, [active, endpoint, limit, loading, token]);
-//   useEffect(() => { if (active) request(null, true); }, [active, endpoint, limit, token]);
-//   return { items, loading, more: () => cursor && request(cursor), refresh: () => request(null, true), hasMore: Boolean(cursor) };
-// }
-// function Table({ data, columns, page, expanded = false }) { const scroll = e => { const el = e.currentTarget; if (page.hasMore && el.scrollHeight - el.scrollTop - el.clientHeight < 80) page.more(); }; return <div className={`table-scroll ${expanded ? "table-expanded" : ""}`} onScroll={scroll}><table><thead><tr>{columns.map(c => <th key={c[0]}>{c[0]}</th>)}</tr></thead><tbody>{data.map(row => <tr key={row.id}>{columns.map(c => <td key={c[0]}>{c[1](row)}</td>)}</tr>)}</tbody></table>{page.loading && <p className="muted loading">Loading…</p>}</div>; }
-// function Card({ label, value, click }) { return <button className="stat" onClick={click}><span className="k">{label}</span><span className="v">{value}</span></button>; }
-// export default function App() {
-//   const [token, setToken] = useState(sessionStorage.getItem("admin_token") || ""), [entry, setEntry] = useState(""), [tab, setTab] = useState("dashboard"), [menu, setMenu] = useState(true), [summary, setSummary] = useState(null), [expanded, setExpanded] = useState(null), [filters, setFilters] = useState({ provider:"", status:"", reference:"" }), [retryError, setRetryError] = useState(""), [retrying, setRetrying] = useState(null);
-//   const auth = Boolean(token); const query = new URLSearchParams(Object.entries(filters).filter(([,v]) => v)).toString();
-//   const events = usePage(`/admin/reconciliation/events${query ? `?${query}` : ""}`, token, auth && ["dashboard","events"].includes(tab), tab === "events" ? 10 : expanded === "events" ? 50 : 8);
-//   const issues = usePage("/admin/reconciliation/issues", token, auth && tab === "dashboard", expanded === "issues" ? 50 : 3);
-//   const loans = usePage("/loans", "", auth && tab === "loans", 10); const overpayments = usePage("/admin/reconciliation/overpayments", token, auth && tab === "overpayments", 10); const retries = usePage("/admin/reconciliation/provider-lookups", token, auth && tab === "receivables", 10);
-//   useEffect(() => { if (auth) fetch("/admin/reconciliation/summary", {headers:{"X-Admin-Token":token}}).then(read).then(setSummary); }, [auth, token]);
-//   if (!auth) return <main className="login"><section className="login-card"><h1>CreditHub</h1><p>Reconciliation operations</p><input value={entry} type="password" placeholder="Staff token" onChange={e=>setEntry(e.target.value)}/><button className="btn btn-primary" onClick={()=>{sessionStorage.setItem("admin_token",entry);setToken(entry)}}>Sign in</button></section></main>;
-//   const nav=[["dashboard","Dashboard"],["events","Events"],["overpayments","Overpayments"],["loans","Loans"],["receivables","Pending receivables"]]; const eventCols=[["Reference",r=>r.reference],["Provider",r=>r.provider],["Kind",r=>r.kind],["Amount",r=>money.format(r.gross_amount)],["Status",r=>r.status]];
-//   const retry = async id => { setRetryError(""); setRetrying(id); try { await read(await fetch(`/admin/reconciliation/provider-lookups/${id}/retry`,{method:"POST",headers:{"X-Admin-Token":token}})); await retries.refresh(); } catch (error) { setRetryError(error.message); } finally { setRetrying(null); } };
-//   const previewButton = (section, page, previewSize) => {
-//     const allShown = !page.loading && !page.hasMore && page.items.length <= previewSize;
-//     return <button className="btn" disabled={allShown} onClick={()=>setExpanded(expanded===section?null:section)}>{expanded===section ? "Collapse" : allShown ? "All shown" : "Expand"}</button>;
-//   };
-//   return <main className={`workspace ${menu ? "" : "collapsed"}`}><aside className="sidebar"><button className="close" aria-label="Collapse navigation" title="Collapse navigation" onClick={()=>setMenu(false)}>‹</button><h1>CreditHub</h1>{nav.map(([id,label])=><button className={tab===id?"side active":"side"} key={id} onClick={()=>setTab(id)}>{label}</button>)}</aside><section className="content"><header className="content-head">{!menu&&<button className="btn menu" aria-label="Expand navigation" title="Expand navigation" onClick={()=>setMenu(true)}>☰</button>}<h2>{nav.find(n=>n[0]===tab)[1]}</h2></header>
-//   {tab==="dashboard"&&<><section className="stats"><Card label="Total events" value={summary?.counts.total??"—"} click={()=>setTab("events")}/><Card label="Processed" value={summary?.counts.applied??"—"} click={()=>setTab("events")}/><Card label="Rejected" value={summary?.counts.rejected??"—"} click={()=>setTab("events")}/><Card label="Open issues" value={summary?.counts.open_issues??"—"} click={()=>setExpanded("issues")}/><Card label="Gross received" value={summary?money.format(summary.amounts.gross_received):"—"} click={()=>setExpanded("events")}/><Card label="Processed amount" value={summary?money.format(summary.amounts.applied):"—"} click={()=>setExpanded("events")}/><Card label="Overpaid" value={summary?money.format(summary.amounts.overpaid):"—"} click={()=>setTab("overpayments")}/><Card label="Rejection rate" value={summary?`${summary.rejection_rate}%`:"—"} click={()=>setTab("events")}/></section><div className="preview-head"><h3>Payment feed</h3>{previewButton("events", events, 8)}</div><Table expanded={expanded==="events"} data={expanded==="events"?events.items:events.items.slice(0,8)} columns={eventCols} page={events}/><div className="preview-head"><h3>Needs attention</h3>{previewButton("issues", issues, 3)}</div><Table expanded={expanded==="issues"} data={expanded==="issues"?issues.items:issues.items.slice(0,3)} columns={[["Reason",r=>r.reason],["Loan",r=>r.loan_id||"—"],["Created",r=>new Date(r.created_at).toLocaleString()]]} page={issues}/></>}
-//   {tab==="events"&&<><div className="filter-bar"><input placeholder="Reference" value={filters.reference} onChange={e=>setFilters({...filters,reference:e.target.value})}/><select value={filters.provider} onChange={e=>setFilters({...filters,provider:e.target.value})}><option value="">All providers</option><option value="paystack">Paystack</option><option value="mock">Mock</option><option value="core_banking">Core banking</option></select><select value={filters.status} onChange={e=>setFilters({...filters,status:e.target.value})}><option value="">All statuses</option><option value="applied">Processed</option><option value="rejected">Rejected</option></select></div><Table data={events.items} columns={eventCols} page={events}/></>}
-//   {tab==="loans"&&<Table data={loans.items} columns={[["Borrower",r=>r.borrower_name],["Outstanding",r=>money.format(r.outstanding)],["Status",r=>r.status]]} page={loans}/>} {tab==="overpayments"&&<Table data={overpayments.items} columns={[["Loan",r=>r.loan_id],["Remaining",r=>money.format(r.remaining_amount)],["Status",r=>r.status]]} page={overpayments}/>} {tab==="receivables"&&<>{retryError&&<p className="banner">Retry failed: {retryError}</p>}<Table data={retries.items} columns={[["Provider",r=>r.provider],["Attempts",r=>r.attempts],["Status",r=>r.status],["",r=><button className="btn" disabled={retrying===r.id} onClick={()=>retry(r.id)}>{retrying===r.id?"Retrying…":"Retry"}</button>]]} page={retries}/></>}</section></main>;
-// }
-
-
-// import React, { useCallback, useEffect, useState } from "react";
-// import "./styles.css";
-//
-// const money = new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN" });
-//
-// const providerName = {
-//   paystack: "Paystack",
-//   mock: "Mock",
-//   core_banking: "Core banking",
-// };
-//
-// const eventKind = {
-//   "transaction.credit": "Credit received",
-// };
-//
-// const pageDescriptions = {
-//   dashboard: "Reconciliation activity, payment outcomes and exceptions at a glance.",
-//   events: "All reconciliation events received from payment and banking rails.",
-//   overpayments: "Amounts received beyond the outstanding balance on a loan.",
-//   loans: "Current borrower balances and loan servicing state.",
-//   receivables: "Provider lookups awaiting reconciliation or retry.",
-// };
-//
-// async function read(response) {
-//   if (response.ok) return response.json();
-//   let detail = `HTTP ${response.status}`;
-//   try {
-//     detail = (await response.json()).detail || detail;
-//   } catch {
-//     /* response was not JSON */
-//   }
-//   throw new Error(detail);
-// }
-//
-// function usePage(endpoint, token, active, limit) {
-//   const [items, setItems] = useState([]);
-//   const [cursor, setCursor] = useState(null);
-//   const [loading, setLoading] = useState(false);
-//
-//   const request = useCallback(
-//     async (next, reset = false) => {
-//       if (!active || loading) return;
-//       setLoading(true);
-//       try {
-//         const sep = endpoint.includes("?") ? "&" : "?";
-//         const data = await read(
-//           await fetch(
-//             `${endpoint}${sep}limit=${limit}${next ? `&cursor=${encodeURIComponent(next)}` : ""}`,
-//             { headers: token ? { "X-Admin-Token": token } : {} },
-//           ),
-//         );
-//         setItems((old) => (reset ? data.items : [...old, ...data.items]));
-//         setCursor(data.next_cursor);
-//       } finally {
-//         setLoading(false);
-//       }
-//     },
-//     [active, endpoint, limit, loading, token],
-//   );
-//
-//   useEffect(() => {
-//     if (active) request(null, true);
-//   }, [active, endpoint, limit, token]);
-//
-//   return {
-//     items,
-//     loading,
-//     more: () => cursor && request(cursor),
-//     refresh: () => request(null, true),
-//     hasMore: Boolean(cursor),
-//   };
-// }
-//
-// function Table({ data, columns, page, expanded = false, emptyMessage = "Nothing to show." }) {
-//   const scroll = (event) => {
-//     const el = event.currentTarget;
-//     if (page.hasMore && el.scrollHeight - el.scrollTop - el.clientHeight < 80) page.more();
-//   };
-//
-//   if (!page.loading && data.length === 0) {
-//     return (
-//       <div className="empty-state">
-//         <span className="empty-icon" aria-hidden="true">✓</span>
-//         <span>{emptyMessage}</span>
-//       </div>
-//     );
-//   }
-//
-//   return (
-//     <div className={`table-scroll ${expanded ? "table-expanded" : ""}`} onScroll={scroll}>
-//       <table>
-//         <thead>
-//           <tr>{columns.map((column) => <th key={column[0]}>{column[0]}</th>)}</tr>
-//         </thead>
-//         <tbody>
-//           {data.map((row) => (
-//             <tr key={row.id}>
-//               {columns.map((column) => <td key={column[0]}>{column[1](row)}</td>)}
-//             </tr>
-//           ))}
-//         </tbody>
-//       </table>
-//       {page.loading && <p className="muted loading">Loading…</p>}
-//     </div>
-//   );
-// }
-//
-// function Card({ label, value, meta, click }) {
-//   return (
-//     <button className="stat" onClick={click}>
-//       <span className="k">{label}</span>
-//       <span className="v">{value}</span>
-//       {meta && <span className="meta">{meta}</span>}
-//     </button>
-//   );
-// }
-//
-// function StatusBadge({ status }) {
-//   const label = status === "applied" ? "Processed" : status
-//     ? status.charAt(0).toUpperCase() + status.slice(1).replaceAll("_", " ")
-//     : "Unknown";
-//   return <span className={`pbadge ${status || "pending"}`}>{label}</span>;
-// }
-//
-// export default function App() {
-//   const [token, setToken] = useState(sessionStorage.getItem("admin_token") || "");
-//   const [entry, setEntry] = useState("");
-//   const [tab, setTab] = useState("dashboard");
-//   const [menu, setMenu] = useState(true);
-//   const [summary, setSummary] = useState(null);
-//   const [expanded, setExpanded] = useState(null);
-//   const [filters, setFilters] = useState({ provider: "", status: "", reference: "" });
-//   const [retryError, setRetryError] = useState("");
-//   const [retrying, setRetrying] = useState(null);
-//
-//   const auth = Boolean(token);
-//   const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value)).toString();
-//   const events = usePage(
-//     `/admin/reconciliation/events${query ? `?${query}` : ""}`,
-//     token,
-//     auth && ["dashboard", "events"].includes(tab),
-//     tab === "events" ? 10 : expanded === "events" ? 50 : 8,
-//   );
-//   const issues = usePage(
-//     "/admin/reconciliation/issues",
-//     token,
-//     auth && tab === "dashboard",
-//     expanded === "issues" ? 50 : 3,
-//   );
-//   const loans = usePage("/loans", "", auth && tab === "loans", 10);
-//   const overpayments = usePage("/admin/reconciliation/overpayments", token, auth && tab === "overpayments", 10);
-//   const retries = usePage("/admin/reconciliation/provider-lookups", token, auth && tab === "receivables", 10);
-//
-//   useEffect(() => {
-//     if (auth) {
-//       fetch("/admin/reconciliation/summary", { headers: { "X-Admin-Token": token } })
-//         .then(read)
-//         .then(setSummary);
-//     }
-//   }, [auth, token]);
-//
-//   if (!auth) {
-//     return (
-//       <main className="login">
-//         <section className="login-card">
-//           <h1>CreditHub</h1>
-//           <p>Reconciliation operations</p>
-//           <input
-//             value={entry}
-//             type="password"
-//             placeholder="Staff token"
-//             onChange={(event) => setEntry(event.target.value)}
-//           />
-//           <button
-//             className="btn btn-primary"
-//             onClick={() => {
-//               sessionStorage.setItem("admin_token", entry);
-//               setToken(entry);
-//             }}
-//           >
-//             Sign in
-//           </button>
-//         </section>
-//       </main>
-//     );
-//   }
-//
-//   const nav = [
-//     ["dashboard", "Dashboard"],
-//     ["events", "Events"],
-//     ["overpayments", "Overpayments"],
-//     ["loans", "Loans"],
-//     ["receivables", "Pending receivables"],
-//   ];
-//
-//   const eventCols = [
-//     ["Reference", (row) => <span className="mono-ref">{row.reference}</span>],
-//     ["Provider", (row) => providerName[row.provider] || row.provider],
-//     ["Kind", (row) => eventKind[row.kind] || row.kind],
-//     ["Amount", (row) => <span className="amount-cell">{money.format(row.gross_amount)}</span>],
-//     ["Status", (row) => <StatusBadge status={row.status} />],
-//   ];
-//
-//   const retry = async (id) => {
-//     setRetryError("");
-//     setRetrying(id);
-//     try {
-//       await read(
-//         await fetch(`/admin/reconciliation/provider-lookups/${id}/retry`, {
-//           method: "POST",
-//           headers: { "X-Admin-Token": token },
-//         }),
-//       );
-//       await retries.refresh();
-//     } catch (error) {
-//       setRetryError(error.message);
-//     } finally {
-//       setRetrying(null);
-//     }
-//   };
-//
-//   const previewButton = (section, page, previewSize) => {
-//     const allShown = !page.loading && !page.hasMore && page.items.length <= previewSize;
-//     if (allShown) return null;
-//     return (
-//       <button
-//         className="link-btn preview-action"
-//         onClick={() => setExpanded(expanded === section ? null : section)}
-//       >
-//         {expanded === section ? "Show less" : "View all →"}
-//       </button>
-//     );
-//   };
-//
-//   const currentTitle = nav.find((item) => item[0] === tab)?.[1] || "Dashboard";
-//
-//   return (
-//     <main className={`workspace ${menu ? "" : "collapsed"}`}>
-//       <aside className="sidebar">
-//         <button
-//           className="close"
-//           aria-label="Collapse navigation"
-//           title="Collapse navigation"
-//           onClick={() => setMenu(false)}
-//         >
-//           ‹
-//         </button>
-//         <h1>CreditHub</h1>
-//         {nav.map(([id, label]) => (
-//           <button
-//             className={tab === id ? "side active" : "side"}
-//             key={id}
-//             onClick={() => setTab(id)}
-//           >
-//             {label}
-//           </button>
-//         ))}
-//       </aside>
-//
-//       <section className="content">
-//         <header className="content-head">
-//           {!menu && (
-//             <button
-//               className="menu-toggle"
-//               aria-label="Expand navigation"
-//               title="Expand navigation"
-//               onClick={() => setMenu(true)}
-//             >
-//               ☰
-//             </button>
-//           )}
-//           <div className="page-heading">
-//             <h2>{currentTitle}</h2>
-//             <p>{pageDescriptions[tab]}</p>
-//           </div>
-//         </header>
-//
-//         {tab === "dashboard" && (
-//           <>
-//             <section className="stats">
-//               <Card
-//                 label="Gross received"
-//                 value={summary ? money.format(summary.amounts.gross_received) : "—"}
-//                 meta={`${summary?.counts.total ?? "—"} payment events`}
-//                 click={() => setExpanded("events")}
-//               />
-//               <Card
-//                 label="Processed"
-//                 value={summary ? money.format(summary.amounts.applied) : "—"}
-//                 meta={`${summary?.counts.applied ?? "—"} applied events`}
-//                 click={() => setTab("events")}
-//               />
-//               <Card
-//                 label="Rejected"
-//                 value={summary?.counts.rejected ?? "—"}
-//                 meta={summary ? `${summary.rejection_rate}% rejection rate` : "—"}
-//                 click={() => setTab("events")}
-//               />
-//               <Card
-//                 label="Exceptions"
-//                 value={summary?.counts.open_issues ?? "—"}
-//                 meta={summary ? `${money.format(summary.amounts.overpaid)} overpaid` : "—"}
-//                 click={() => setExpanded("issues")}
-//               />
-//             </section>
-//
-//             <div className="preview-head">
-//               <h3>Recent payments</h3>
-//               {previewButton("events", events, 8)}
-//             </div>
-//             <Table
-//               expanded={expanded === "events"}
-//               data={expanded === "events" ? events.items : events.items.slice(0, 8)}
-//               columns={eventCols}
-//               page={events}
-//               emptyMessage="No payment events have been received yet."
-//             />
-//
-//             <div className="preview-head">
-//               <h3>Needs attention</h3>
-//               {previewButton("issues", issues, 3)}
-//             </div>
-//             <Table
-//               expanded={expanded === "issues"}
-//               data={expanded === "issues" ? issues.items : issues.items.slice(0, 3)}
-//               columns={[
-//                 ["Reason", (row) => row.reason],
-//                 ["Loan", (row) => row.loan_id || "—"],
-//                 ["Created", (row) => new Date(row.created_at).toLocaleString()],
-//               ]}
-//               page={issues}
-//               emptyMessage="No reconciliation issues require attention."
-//             />
-//           </>
-//         )}
-//
-//         {tab === "events" && (
-//           <>
-//             <div className="filter-bar">
-//               <input
-//                 placeholder="Search reference"
-//                 value={filters.reference}
-//                 onChange={(event) => setFilters({ ...filters, reference: event.target.value })}
-//               />
-//               <select
-//                 value={filters.provider}
-//                 onChange={(event) => setFilters({ ...filters, provider: event.target.value })}
-//               >
-//                 <option value="">All providers</option>
-//                 <option value="paystack">Paystack</option>
-//                 <option value="mock">Mock</option>
-//                 <option value="core_banking">Core banking</option>
-//               </select>
-//               <select
-//                 value={filters.status}
-//                 onChange={(event) => setFilters({ ...filters, status: event.target.value })}
-//               >
-//                 <option value="">All statuses</option>
-//                 <option value="applied">Processed</option>
-//                 <option value="rejected">Rejected</option>
-//               </select>
-//             </div>
-//             <Table data={events.items} columns={eventCols} page={events} emptyMessage="No events match these filters." />
-//           </>
-//         )}
-//
-//         {tab === "loans" && (
-//           <Table
-//             data={loans.items}
-//             columns={[
-//               ["Borrower", (row) => row.borrower_name],
-//               ["Outstanding", (row) => <span className="amount-cell">{money.format(row.outstanding)}</span>],
-//               ["Status", (row) => <StatusBadge status={row.status} />],
-//             ]}
-//             page={loans}
-//             emptyMessage="No loans to show."
-//           />
-//         )}
-//
-//         {tab === "overpayments" && (
-//           <Table
-//             data={overpayments.items}
-//             columns={[
-//               ["Loan", (row) => row.loan_id],
-//               ["Remaining", (row) => <span className="amount-cell">{money.format(row.remaining_amount)}</span>],
-//               ["Status", (row) => <StatusBadge status={row.status} />],
-//             ]}
-//             page={overpayments}
-//             emptyMessage="No overpayments to show."
-//           />
-//         )}
-//
-//         {tab === "receivables" && (
-//           <>
-//             {retryError && <p className="banner">Retry failed: {retryError}</p>}
-//             <Table
-//               data={retries.items}
-//               columns={[
-//                 ["Provider", (row) => providerName[row.provider] || row.provider],
-//                 ["Attempts", (row) => row.attempts],
-//                 ["Status", (row) => <StatusBadge status={row.status} />],
-//                 ["", (row) => (
-//                   <button className="btn" disabled={retrying === row.id} onClick={() => retry(row.id)}>
-//                     {retrying === row.id ? "Retrying…" : "Retry"}
-//                   </button>
-//                 )],
-//               ]}
-//               page={retries}
-//               emptyMessage="No provider lookups are waiting for action."
-//             />
-//           </>
-//         )}
-//       </section>
-//     </main>
-//   );
-// }
-
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import "./styles.css";
 
@@ -724,6 +269,163 @@ function DetailGrid({ data, onLoanClick }) {
   );
 }
 
+function timelineTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function buildReconciliationTimeline(data) {
+  const event = data?.event;
+  if (!event) return [];
+
+  const ledger = data?.ledger || [];
+  const entries = [];
+  const provider = providerName[event.provider] || event.provider || "provider";
+  const isCredit = event.kind === "transaction.credit";
+  const receivedTitle = isCredit
+    ? "Payment received"
+    : event.kind === "transaction.reversal"
+      ? "Reversal received"
+      : event.kind === "transaction.refund"
+        ? "Refund received"
+        : "Financial event received";
+
+  entries.push({
+    key: "received",
+    at: event.received_at,
+    title: receivedTitle,
+    actor: provider,
+    tone: "neutral",
+  });
+
+  if (event.loan_id) {
+    entries.push({
+      key: "matched",
+      at: ledger[0]?.created_at || event.processed_at || event.received_at,
+      title: `Matched to Loan #${event.loan_id}`,
+      actor: "reconciliation-engine",
+      tone: "neutral",
+    });
+  }
+
+  ledger.forEach((row, index) => {
+    const amount = Math.abs(Number(row.amount || 0));
+    const loanDelta = Number(row.loan_balance_delta || 0);
+    const overpaymentDelta = Number(row.overpayment_balance_delta || 0);
+    const at = row.created_at || event.processed_at;
+
+    if (row.type === "repayment") {
+      entries.push({
+        key: `ledger-${index}-apply`,
+        at,
+        title: `${money.format(amount)} applied`,
+        actor: "reconciliation-engine",
+        tone: "success",
+      });
+      if (loanDelta !== 0) {
+        entries.push({
+          key: `ledger-${index}-loan`,
+          at,
+          title: `Loan balance reduced by ${money.format(Math.abs(loanDelta))}`,
+          actor: "reconciliation-engine",
+          tone: "success",
+        });
+      }
+    } else if (row.type === "overpayment") {
+      entries.push({
+        key: `ledger-${index}-overpayment`,
+        at,
+        title: `${money.format(Math.abs(overpaymentDelta || amount))} recorded as overpayment`,
+        actor: "reconciliation-engine",
+        tone: "warning",
+      });
+    } else if (row.type === "repayment_reversal") {
+      entries.push({
+        key: `ledger-${index}-reversal`,
+        at,
+        title: `${money.format(amount)} repayment reversed`,
+        actor: "reconciliation-engine",
+        tone: "warning",
+      });
+      if (loanDelta !== 0) {
+        entries.push({
+          key: `ledger-${index}-restore`,
+          at,
+          title: `Loan balance restored by ${money.format(Math.abs(loanDelta))}`,
+          actor: "reconciliation-engine",
+          tone: "warning",
+        });
+      }
+    } else if (row.type === "overpayment_reversal") {
+      entries.push({
+        key: `ledger-${index}-overpayment-reversal`,
+        at,
+        title: `${money.format(Math.abs(overpaymentDelta || amount))} overpayment reversed`,
+        actor: "reconciliation-engine",
+        tone: "warning",
+      });
+    } else if (row.type === "overpayment_refund") {
+      entries.push({
+        key: `ledger-${index}-refund`,
+        at,
+        title: `${money.format(Math.abs(overpaymentDelta || amount))} overpayment refunded`,
+        actor: "reconciliation-engine",
+        tone: "success",
+      });
+    } else {
+      entries.push({
+        key: `ledger-${index}-${row.type}`,
+        at,
+        title: `${detailLabel(row.type || "ledger entry")} · ${money.format(amount)}`,
+        actor: "reconciliation-engine",
+        tone: "neutral",
+      });
+    }
+  });
+
+  if (event.status === "rejected") {
+    entries.push({
+      key: "rejected",
+      at: event.processed_at || data?.audit?.[0]?.created_at || event.received_at,
+      title: `Event rejected${event.reason ? ` · ${detailLabel(event.reason)}` : ""}`,
+      actor: "reconciliation-engine",
+      tone: "error",
+    });
+  } else if (isCredit && (event.reason === "full_payment" || Number(event.overpaid_amount || 0) > 0)) {
+    entries.push({
+      key: "paid-off",
+      at: event.processed_at || ledger.at(-1)?.created_at,
+      title: "Loan marked paid off",
+      actor: "reconciliation-engine",
+      tone: "success",
+    });
+  }
+
+  return entries;
+}
+
+function ReconciliationTimeline({ data }) {
+  const entries = buildReconciliationTimeline(data);
+  if (!entries.length) return <p className="detail-empty">No reconciliation timeline is available.</p>;
+
+  return (
+    <ol className="reconciliation-timeline">
+      {entries.map((entry) => (
+        <li className={`timeline-item ${entry.tone || "neutral"}`} key={entry.key}>
+          <span className="timeline-marker" aria-hidden="true" />
+          <div className="timeline-copy">
+            <time dateTime={entry.at || undefined}>{timelineTime(entry.at)}</time>
+            <strong>{entry.title}</strong>
+            <span>{entry.actor}</span>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 function EventDetailOverlay({ eventId, data, loading, error, onClose, onRetry, onOpenLoan }) {
   const event = data?.event || null;
   const ledger = data?.ledger || [];
@@ -783,6 +485,14 @@ function EventDetailOverlay({ eventId, data, loading, error, onClose, onRetry, o
                   <h4>Event</h4>
                 </div>
                 <DetailGrid data={event} onLoanClick={onOpenLoan} />
+              </section>
+
+              <section className="detail-section">
+                <div className="detail-section-head">
+                  <h4>Reconciliation timeline</h4>
+                  <span>Derived from event + ledger facts</span>
+                </div>
+                <ReconciliationTimeline data={data} />
               </section>
 
               <section className="detail-section">
@@ -869,7 +579,7 @@ function EventDetailOverlay({ eventId, data, loading, error, onClose, onRetry, o
 
               <section className="detail-section">
                 <div className="detail-section-head">
-                  <h4>Audit trail</h4>
+                  <h4>Audit log</h4>
                   <span>{audit.length}</span>
                 </div>
                 {audit.length ? (

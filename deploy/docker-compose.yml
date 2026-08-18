@@ -27,7 +27,7 @@ services:
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
       # Increment with each Alembic revision so Compose recreates this one-shot
       # service instead of reusing a completed container from an older build.
-      EXPECTED_ALEMBIC_REVISION: "005"
+      EXPECTED_ALEMBIC_REVISION: "006"
     depends_on:
       db:
         condition: service_healthy
@@ -44,7 +44,7 @@ services:
     depends_on:
       migrations:
         condition: service_completed_successfully
-    command: ["python", "-m", "app.seed"]
+    command: ["python", "-m", "app.scripts.seed"]
     restart: "no"
 
   api:

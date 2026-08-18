@@ -11,7 +11,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import asc, desc
 
 from app.adapters.persistence.audit import record_audit
 from app.adapters.persistence.sqlalchemy_backend.sqlalchemy_repositories import SQLAlchemyUnitOfWork
@@ -98,8 +97,6 @@ def list_events(
     reference: Optional[str] = None,
     cursor: Optional[str] = None,
     limit: int = DEFAULT_PAGE_SIZE,
-    sort: str = "received_at",
-    direction: str = "desc",
     _: str = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -109,10 +106,6 @@ def list_events(
     if kind: query = query.filter(PaymentEvent.event_kind == kind)
     if loan_id: query = query.filter(PaymentEvent.loan_id == loan_id)
     if reference: query = query.filter(PaymentEvent.external_ref.contains(reference))
-    sortable = {"received_at": PaymentEvent.received_at, "amount": PaymentEvent.amount, "status": PaymentEvent.status, "provider": PaymentEvent.provider}
-    if sort not in sortable or direction not in {"asc", "desc"}:
-        raise HTTPException(status_code=422, detail="Invalid sort or direction")
-    query = query.order_by(asc(sortable[sort]) if direction == "asc" else desc(sortable[sort]))
     rows, next_cursor = chronological_page(query, PaymentEvent, PaymentEvent.received_at, cursor, limit)
     return {"items": [event_out(row) for row in rows], "next_cursor": next_cursor}
 

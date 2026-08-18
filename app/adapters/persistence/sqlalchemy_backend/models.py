@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, Uuid
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, Uuid, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.adapters.persistence.db import Base
 
@@ -30,9 +30,12 @@ class Loan(Base):
 
 class PaymentEvent(Base):
     __tablename__ = "payment_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "merchant_scope", "event_kind", "external_ref", name="uq_payment_events_canonical_identity"),
+    )
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     external_ref = Column(String, nullable=False)
-    loan_id = Column(Uuid, ForeignKey("loans.id"), nullable=False)
+    loan_id = Column(Uuid, ForeignKey("loans.id"), nullable=True)
     amount = Column(Numeric(20, 2), nullable=False)
     channel = Column(String, nullable=False, default="paystack")
     provider = Column(String, nullable=False, default="paystack")

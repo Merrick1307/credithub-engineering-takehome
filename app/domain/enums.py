@@ -29,6 +29,7 @@ class ReconciliationReason(str, enum.Enum):
     """Business reason for reconciliation outcome."""
     # Success reasons
     full_payment = "full_payment"
+    partial_payment = "partial_payment"
     
     # Rejection reasons for payments
     active_loan_remainder = "active_loan_remainder"  # For partially_applied on active loan
@@ -36,7 +37,11 @@ class ReconciliationReason(str, enum.Enum):
     unknown_loan = "unknown_loan"
     ambiguous_mapping = "ambiguous_mapping"
     identity_conflict = "identity_conflict"
+    duplicate_payment = "duplicate_payment"
     invalid_amount = "invalid_amount"
+    provider_status_not_final_success = "provider_status_not_final_success"
+    provider_lookup_mismatch = "provider_lookup_mismatch"
+    provider_lookup_not_found = "provider_lookup_not_found"
     
     # Reversal/refund reasons
     reversal_without_original = "reversal_without_original"

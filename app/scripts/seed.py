@@ -1,6 +1,6 @@
 """Seed synthetic loans + a little payment history.
 
-Run safely on every startup:  python -m app.seed
+Run safely on every startup:  python -m app.scripts.seed
 
 The seeded events are already reconciled (applied/rejected) — they're history,
 so the feed isn't empty on first load. New payments arrive via the webhook (the

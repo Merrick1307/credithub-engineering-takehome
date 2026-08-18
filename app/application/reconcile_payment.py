@@ -102,16 +102,8 @@ class ReconcilePaymentUseCase:
             # identified by their immutable event kind, never by a negative
             # credit amount.
             if not canonical_event.gross_amount.is_positive():
-                return ReconciliationResult(
-                    event_id=None,
-                    status=ReconciliationStatus.rejected,
-                    reason=ReconciliationReason.invalid_amount,
-                    gross_amount=canonical_event.gross_amount,
-                    applied_amount=Money(Decimal(0), canonical_event.gross_amount.currency),
-                    overpaid_amount=Money(Decimal(0), canonical_event.gross_amount.currency),
-                    loan_id=None,
-                    loan_status=None,
-                    loan_outstanding=None,
+                return self._record_rejected_event(
+                    canonical_event, ReconciliationReason.invalid_amount
                 )
             
             # Step 2: Perform provider lookup if configured
@@ -145,10 +137,16 @@ class ReconcilePaymentUseCase:
                         f"{canonical_event.event_reference}"
                     ),
                 )
+                # Do not claim the canonical financial-event identity for a
+                # non-final provider state. Some rails reuse the same reference
+                # when a pending event later becomes succeeded; journaling it as
+                # a rejected PaymentEvent here would make that later final event
+                # look like an idempotent replay/conflict. The delivery/outbox
+                # facts above retain the non-actionable callback instead.
                 return ReconciliationResult(
                     event_id=None,
                     status=ReconciliationStatus.rejected,
-                    reason=ReconciliationReason.unknown_loan,  # Placeholder
+                    reason=ReconciliationReason.provider_status_not_final_success,
                     gross_amount=canonical_event.gross_amount,
                     applied_amount=Money(Decimal(0), canonical_event.gross_amount.currency),
                     overpaid_amount=Money(Decimal(0), canonical_event.gross_amount.currency),
@@ -167,6 +165,49 @@ class ReconcilePaymentUseCase:
             else:
                 raise ValueError(f"Unknown event kind: {canonical_event.event_kind}")
     
+    def _record_rejected_event(
+        self,
+        event: CanonicalFinancialEvent,
+        reason: ReconciliationReason,
+        loan_id=None,
+    ) -> ReconciliationResult:
+        """Journal a normalized financial event that is safe to reject.
+
+        A rejected callback is still an operational fact. Keeping it in the
+        payment-event journal makes unknown mappings, invalid amounts and other
+        non-actionable events visible to the admin reconciliation surface.
+        """
+        event_id = self.uow.payment_events.record_event(
+            provider=event.provider,
+            merchant_scope=event.merchant_scope,
+            event_kind=event.event_kind,
+            event_reference=event.event_reference,
+            original_payment_reference=event.original_payment_reference,
+            gross_amount=event.gross_amount.amount,
+            provider_status=event.provider_status,
+            provider_event_type=event.provider_event_type,
+            provider_metadata=event.provider_metadata,
+            timestamp=event.timestamp,
+            idempotency_fingerprint=self._make_fingerprint(event),
+            loan_id=loan_id,
+        )
+        self.uow.payment_events.update_event_reconciliation(
+            event_id, loan_id, ReconciliationStatus.rejected, reason.value,
+            Decimal(0), Decimal(0),
+        )
+        loan = self.uow.loans.get_loan_by_id(loan_id) if loan_id else None
+        return ReconciliationResult(
+            event_id=event_id,
+            status=ReconciliationStatus.rejected,
+            reason=reason,
+            gross_amount=event.gross_amount,
+            applied_amount=Money(Decimal(0), event.gross_amount.currency),
+            overpaid_amount=Money(Decimal(0), event.gross_amount.currency),
+            loan_id=loan_id,
+            loan_status=LoanStatus(loan.status.value) if loan else None,
+            loan_outstanding=Money(Decimal(str(loan.outstanding)), event.gross_amount.currency) if loan else None,
+        )
+
     def _reconcile_payment(
         self,
         event: CanonicalFinancialEvent,
@@ -181,46 +222,16 @@ class ReconcilePaymentUseCase:
         )
         
         if not loan_ids:
-            return ReconciliationResult(
-                event_id=None,
-                status=ReconciliationStatus.rejected,
-                reason=ReconciliationReason.unknown_loan,
-                gross_amount=event.gross_amount,
-                applied_amount=Money(Decimal(0), event.gross_amount.currency),
-                overpaid_amount=Money(Decimal(0), event.gross_amount.currency),
-                loan_id=None,
-                loan_status=None,
-                loan_outstanding=None,
-            )
+            return self._record_rejected_event(event, ReconciliationReason.unknown_loan)
         
         if len(loan_ids) > 1:
-            return ReconciliationResult(
-                event_id=None,
-                status=ReconciliationStatus.rejected,
-                reason=ReconciliationReason.ambiguous_mapping,
-                gross_amount=event.gross_amount,
-                applied_amount=Money(Decimal(0), event.gross_amount.currency),
-                overpaid_amount=Money(Decimal(0), event.gross_amount.currency),
-                loan_id=None,
-                loan_status=None,
-                loan_outstanding=None,
-            )
+            return self._record_rejected_event(event, ReconciliationReason.ambiguous_mapping)
         
         loan_id = loan_ids[0]
         loan = self.uow.loans.get_loan_by_id(loan_id)
         
         if not loan:
-            return ReconciliationResult(
-                event_id=None,
-                status=ReconciliationStatus.rejected,
-                reason=ReconciliationReason.unknown_loan,
-                gross_amount=event.gross_amount,
-                applied_amount=Money(Decimal(0), event.gross_amount.currency),
-                overpaid_amount=Money(Decimal(0), event.gross_amount.currency),
-                loan_id=None,
-                loan_status=None,
-                loan_outstanding=None,
-            )
+            return self._record_rejected_event(event, ReconciliationReason.unknown_loan)
 
         # Re-check after the loan lock. A concurrent redelivery may have
         # passed the initial pre-lock identity check and then waited here.
@@ -246,6 +257,7 @@ class ReconcilePaymentUseCase:
                 provider_metadata=event.provider_metadata,
                 timestamp=event.timestamp,
                 idempotency_fingerprint=self._make_fingerprint(event),
+                loan_id=loan_id,
             )
             overpayment = self.uow.overpayments.create(loan_id, event_id, event.gross_amount.amount)
             self.uow.loans.record_repayment_ledger(
@@ -289,6 +301,7 @@ class ReconcilePaymentUseCase:
             provider_metadata=event.provider_metadata,
             timestamp=event.timestamp,
             idempotency_fingerprint=self._make_fingerprint(event),
+            loan_id=loan_id,
         )
         
         if event.gross_amount.amount > outstanding.amount:
@@ -401,7 +414,7 @@ class ReconcilePaymentUseCase:
                 event_id,
                 loan_id,
                 ReconciliationStatus.applied,
-                ReconciliationReason.full_payment.value,
+                ReconciliationReason.partial_payment.value,
                 event.gross_amount.amount,
                 Decimal(0),
             )
@@ -411,7 +424,7 @@ class ReconcilePaymentUseCase:
             return ReconciliationResult(
                 event_id=event_id,
                 status=ReconciliationStatus.applied,
-                reason=ReconciliationReason.full_payment,
+                reason=ReconciliationReason.partial_payment,
                 gross_amount=event.gross_amount,
                 applied_amount=event.gross_amount,
                 overpaid_amount=Money(Decimal(0), "NGN"),
@@ -493,6 +506,7 @@ class ReconcilePaymentUseCase:
             provider_metadata=event.provider_metadata,
             timestamp=event.timestamp,
             idempotency_fingerprint=self._make_fingerprint(event),
+            loan_id=loan_id,
         )
 
         repayment_amount = Decimal(0)
@@ -545,23 +559,14 @@ class ReconcilePaymentUseCase:
             loan_outstanding=outstanding,
         )
 
-    @staticmethod
     def _reject_reversal(
+        self,
         event: CanonicalFinancialEvent,
         reason: ReconciliationReason,
+        loan_id=None,
     ) -> ReconciliationResult:
-        """Return a safe, non-mutating reversal rejection."""
-        return ReconciliationResult(
-            event_id=None,
-            status=ReconciliationStatus.rejected,
-            reason=reason,
-            gross_amount=event.gross_amount,
-            applied_amount=Money(Decimal(0), event.gross_amount.currency),
-            overpaid_amount=Money(Decimal(0), event.gross_amount.currency),
-            loan_id=None,
-            loan_status=None,
-            loan_outstanding=None,
-        )
+        """Journal a reversal/refund that cannot be safely applied."""
+        return self._record_rejected_event(event, reason, loan_id=loan_id)
     
     def _reconcile_refund(
         self,
@@ -614,6 +619,7 @@ class ReconcilePaymentUseCase:
             provider_metadata=event.provider_metadata,
             timestamp=event.timestamp,
             idempotency_fingerprint=self._make_fingerprint(event),
+            loan_id=loan_id,
         )
         self.uow.overpayments.apply_refund(overpayment["id"], event.gross_amount.amount)
         self.uow.loans.record_repayment_ledger(
@@ -684,33 +690,22 @@ class ReconcilePaymentUseCase:
             loan_id=None, loan_status=None, loan_outstanding=None,
         )
     
-    def _reject_identity_conflict(
-        self,
-        event: CanonicalFinancialEvent,
-        correlation_id: str,
-        existing: dict,
-    ) -> ReconciliationResult:
-        """Handle identity conflict: same reference, different fingerprint."""
-        # Record issue for operator review
-        # Return stable rejected response
-        raise NotImplementedError()
-    
     def _reject_lookup_mismatch(
         self,
         event: CanonicalFinancialEvent,
         correlation_id: str,
         lookup_result: dict,
     ) -> ReconciliationResult:
-        """Handle provider lookup mismatch."""
-        raise NotImplementedError()
+        """Journal a provider verification mismatch for operator review."""
+        return self._record_rejected_event(event, ReconciliationReason.provider_lookup_mismatch)
     
     def _reject_not_found(
         self,
         event: CanonicalFinancialEvent,
         correlation_id: str,
     ) -> ReconciliationResult:
-        """Handle provider lookup terminal not-found."""
-        raise NotImplementedError()
+        """Journal a terminal provider lookup miss."""
+        return self._record_rejected_event(event, ReconciliationReason.provider_lookup_not_found)
     
     def _build_result_from_stored(
         self,
@@ -735,11 +730,14 @@ class ReconcilePaymentUseCase:
                 if overpaid_amount.amount > 0
                 else ReconciliationStatus.applied
             )
-            reason = (
-                ReconciliationReason.active_loan_remainder
-                if reconciliation_status == ReconciliationStatus.partially_applied
-                else ReconciliationReason.full_payment
-            )
+            try:
+                reason = ReconciliationReason(stored_event.get("reason"))
+            except (ValueError, TypeError):
+                reason = (
+                    ReconciliationReason.active_loan_remainder
+                    if reconciliation_status == ReconciliationStatus.partially_applied
+                    else ReconciliationReason.full_payment
+                )
             return ReconciliationResult(
                 event_id=stored_event.get("id"),
                 status=reconciliation_status,
@@ -779,11 +777,14 @@ class ReconcilePaymentUseCase:
     @staticmethod
     def _make_fingerprint(event: CanonicalFinancialEvent) -> str:
         """Create a stable fingerprint for idempotency conflict detection."""
-        # Hash immutable fields: amount, original_payment_ref, timestamp
+        # Hash immutable economic content that is not already part of the
+        # canonical identity. Provider timestamps are intentionally excluded:
+        # the legacy exercise payload has no provider timestamp and a rail may
+        # legitimately redeliver the same economic event with transport-time
+        # metadata changed.
         data = {
             "gross_amount": str(event.gross_amount.amount),
             "currency": event.gross_amount.currency,
             "original_payment_reference": event.original_payment_reference,
-            "timestamp": event.timestamp.isoformat(),
         }
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]

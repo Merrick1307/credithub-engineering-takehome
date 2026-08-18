@@ -11,6 +11,9 @@ from app.api.dependencies import set_session_factory
 
 # Import new architecture
 from .application.reconcile_payment import ReconcilePaymentUseCase
+from .domain.enums import ReconciliationStatus, ReconciliationReason
+from .domain.models import Money, ReconciliationResult
+from decimal import Decimal
 from app.adapters.persistence.sqlalchemy_backend.sqlalchemy_repositories import SQLAlchemyUnitOfWork
 from .infrastructure.provider_registry import SimpleProviderRegistry, NoOpProviderLookup
 from .infrastructure.authenticators import TokenAuthenticator
@@ -76,9 +79,14 @@ def record_delivery(provider: str, raw_body: bytes, correlation_id: str, result)
     """Persist a sanitized callback fact after financial reconciliation commits."""
     db = SessionLocal()
     try:
+        delivery_status = (
+            "duplicate" if result.idempotent_replay
+            else "accepted" if result.status.value != "rejected"
+            else "non_actionable"
+        )
         db.add(WebhookDelivery(
             provider=provider,
-            delivery_status="accepted" if result.status.value != "rejected" else "non_actionable",
+            delivery_status=delivery_status,
             payload_digest=hashlib.sha256(raw_body).hexdigest(),
             payment_event_id=result.event_id,
             correlation_id=correlation_id,
@@ -148,8 +156,29 @@ async def receive_payment_webhook(request: Request):
         uow = SQLAlchemyUnitOfWork(SessionLocal)
         use_case = ReconcilePaymentUseCase(uow, provider_registry, provider_lookup)
         result = use_case.execute(canonical_event, correlation_id)
-        record_delivery(provider, raw_body, correlation_id, result)
-        return result.to_dict()
+
+        # The supplied take-home contract calls an already-applied legacy
+        # redelivery a rejected duplicate. The shared use case itself returns
+        # the prior committed result as an idempotent replay so provider-native
+        # integrations can safely acknowledge exact redeliveries. Adapt only
+        # the legacy HTTP response while preserving the stored event/result.
+        response_result = result
+        if result.idempotent_replay and result.status != ReconciliationStatus.rejected:
+            response_result = ReconciliationResult(
+                event_id=result.event_id,
+                status=ReconciliationStatus.rejected,
+                reason=ReconciliationReason.duplicate_payment,
+                gross_amount=result.gross_amount,
+                applied_amount=Money(Decimal(0), result.gross_amount.currency),
+                overpaid_amount=Money(Decimal(0), result.gross_amount.currency),
+                loan_id=result.loan_id,
+                loan_status=result.loan_status,
+                loan_outstanding=result.loan_outstanding,
+                idempotent_replay=True,
+            )
+
+        record_delivery(provider, raw_body, correlation_id, response_result)
+        return response_result.to_dict()
     
     except HTTPException:
         raise

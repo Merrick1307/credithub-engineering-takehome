@@ -38,7 +38,8 @@ class SimpleProviderRegistry(ProviderRegistry):
             "enabled": True,
             "secret_key": "core-banking-token-for-testing",
             "lookup_enabled": False,
-            "auth_scheme": "internal_token",
+            "auth_scheme": "hmac_sha256",
+            "legacy_token_compatible": True,
             "amount_format": "major_units",
         },
     }

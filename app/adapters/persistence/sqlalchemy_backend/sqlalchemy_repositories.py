@@ -214,13 +214,14 @@ class SQLAlchemyPaymentEventRepository(PaymentEventRepository):
         provider_metadata: dict,
         timestamp: datetime,
         idempotency_fingerprint: str,
+        loan_id: Optional[int] = None,
     ) -> int:
         """Insert a new canonical event."""
         # The legacy schema stores the canonical fields alongside its original
         # feed columns, so both webhook contracts share one event journal.
         event = PaymentEvent(
             external_ref=event_reference,
-            loan_id=uuid.UUID(merchant_scope),
+            loan_id=loan_id,
             amount=gross_amount,
             channel=provider,
             provider=provider,

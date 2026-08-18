@@ -109,7 +109,7 @@ We'll follow up with a ~30-minute call where you walk us through your own code.
 # terminal 1 — backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python -m app.seed
+python -m app.scripts.seed
 uvicorn app.main:app --reload --port 8137     # http://localhost:8137/docs
 
 # terminal 2 — frontend

@@ -107,6 +107,7 @@ class PaymentEventRepository(ABC):
         provider_metadata: dict,
         timestamp: datetime,
         idempotency_fingerprint: str,
+        loan_id: Optional[str] = None,
     ) -> int:
         """Insert a new canonical event and return its ID."""
         pass

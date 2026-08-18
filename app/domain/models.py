@@ -53,7 +53,7 @@ class LoanBalance:
     
     @property
     def is_paid_off(self) -> bool:
-        return self.outstanding.is_zero or self.outstanding.is_negative
+        return self.outstanding.is_zero() or self.outstanding.is_negative()
 
 
 @dataclass(frozen=True)

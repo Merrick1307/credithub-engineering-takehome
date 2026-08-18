@@ -1,6 +1,6 @@
 """Simple normalizers for demo/legacy formats."""
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from ..domain.models import CanonicalFinancialEvent, Money
 from ..domain.enums import EventKind
@@ -28,9 +28,8 @@ class LegacyPaystackNormalizer(ProviderNormalizer):
         """
         
         try:
-            amount_float = float(provider_dto.get("amount", 0))
-            gross_amount = Money(Decimal(str(amount_float)), "NGN")
-        except (ValueError, TypeError) as e:
+            gross_amount = Money(Decimal(str(provider_dto.get("amount", 0))), "NGN")
+        except (InvalidOperation, ValueError, TypeError) as e:
             raise ValueError(f"Invalid amount: {e}")
         
         external_ref = provider_dto.get("external_ref")

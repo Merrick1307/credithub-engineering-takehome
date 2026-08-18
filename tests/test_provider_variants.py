@@ -54,3 +54,36 @@ def test_core_banking_provider_template(client):
     assert response.status_code == 200
     assert response.json()["event"]["status"] == "applied"
     assert client.get(f"/loans/{ACTIVE_LOAN_ID}").json()["outstanding"] == 36_000
+
+def test_non_final_provider_status_does_not_block_later_success(client):
+    payload = {
+        "transaction_id": "PENDING-THEN-SUCCESS-001",
+        "amount": 2_000_000,
+        "customer_id": ACTIVE_LOAN_ID,
+        "status": "pending",
+        "timestamp": "2026-08-18T10:00:00Z",
+        "event_type": "payment",
+        "metadata": {},
+    }
+
+    pending = client.post(
+        "/webhooks/payments/mock",
+        content=json.dumps(payload),
+        headers=_hmac_headers(payload, "mock-secret-key-for-testing"),
+    )
+    assert pending.status_code == 200
+    assert pending.json()["event"]["status"] == "rejected"
+    assert pending.json()["event"]["id"] is None
+    assert pending.json()["reconciliation"]["reason"] == "provider_status_not_final_success"
+    assert client.get(f"/loans/{ACTIVE_LOAN_ID}").json()["outstanding"] == 56_000
+
+    payload["status"] = "success"
+    succeeded = client.post(
+        "/webhooks/payments/mock",
+        content=json.dumps(payload),
+        headers=_hmac_headers(payload, "mock-secret-key-for-testing"),
+    )
+    assert succeeded.status_code == 200
+    assert succeeded.json()["event"]["status"] == "applied"
+    assert client.get(f"/loans/{ACTIVE_LOAN_ID}").json()["outstanding"] == 36_000
+

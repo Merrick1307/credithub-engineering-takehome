@@ -1,5 +1,7 @@
 """Simple token-based authenticator for the demo."""
 
+import hmac
+
 from ..ports.providers import ProviderAuthenticator
 
 
@@ -21,4 +23,4 @@ class TokenAuthenticator(ProviderAuthenticator):
             return False
         
         # Constant-time comparison to prevent timing attacks
-        return token == expected_token
+        return hmac.compare_digest(token, expected_token)

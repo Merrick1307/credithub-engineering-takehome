@@ -26,6 +26,7 @@ def test_webhook_applies_payment_and_reduces_outstanding(client):
     r = client.post("/webhooks/payments", json=_pay("R-1", ACTIVE_LOAN_ID, 20000), headers=TOK)
     assert r.status_code == 200
     assert r.json()["event"]["status"] == "applied"
+    assert r.json()["reconciliation"]["reason"] == "partial_payment"
     assert client.get(f"/loans/{ACTIVE_LOAN_ID}").json()["outstanding"] == 36000
 
 
@@ -38,6 +39,8 @@ def test_duplicate_external_ref_is_rejected(client):
     client.post("/webhooks/payments", json=_pay("R-1", ACTIVE_LOAN_ID, 20000), headers=TOK)
     r = client.post("/webhooks/payments", json=_pay("R-1", ACTIVE_LOAN_ID, 20000), headers=TOK)  # redelivery
     assert r.json()["event"]["status"] == "rejected"
+    assert r.json()["reconciliation"]["reason"] == "duplicate_payment"
+    assert r.json()["reconciliation"]["idempotent_replay"] is True
     assert client.get(f"/loans/{ACTIVE_LOAN_ID}").json()["outstanding"] == 36000  # applied once only
 
 
@@ -50,6 +53,7 @@ def test_payment_for_cancelled_loan_is_rejected(client):
 def test_unknown_loan_is_rejected(client):
     r = client.post("/webhooks/payments", json=_pay("R-4", MISSING_LOAN_ID, 100), headers=TOK)
     assert r.json()["event"]["status"] == "rejected"
+    assert r.json()["event"]["id"] is not None  # rejected events remain journaled
 
 
 def test_overpayment_is_partially_applied(client):
@@ -69,6 +73,7 @@ def test_webhook_requires_a_valid_token(client):
 def test_negative_credit_is_rejected_not_treated_as_a_reversal(client):
     r = client.post("/webhooks/payments", json=_pay("R-NEG", ACTIVE_LOAN_ID, -100), headers=TOK)
     assert r.json()["event"]["status"] == "rejected"
+    assert r.json()["event"]["id"] is not None
     assert r.json()["reconciliation"]["reason"] == "invalid_amount"
     assert client.get(f"/loans/{ACTIVE_LOAN_ID}").json()["outstanding"] == 56000
 
