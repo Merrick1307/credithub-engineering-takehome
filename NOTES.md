@@ -163,3 +163,48 @@ audited.
 - Before lender production, implement and operate the outbox publisher, retry
   scheduling/leases, real provider contract verification, secret management,
   PostgreSQL concurrency coverage, monitoring, and recovery runbooks.
+
+## Background processing amendment
+
+### My part
+
+I separated generic downstream publication from automatic overpayment refunds.
+The transactional outbox remains the durable source for generic post-commit
+notifications. Core-banking overpayments instead create their own durable refund
+work records, which a scheduled refund runner processes independently.
+
+### Assistance gotten from AI
+
+AI helped identify that using the generic outbox as both notification transport
+and refund-command queue would blur two operational responsibilities. It helped
+define separate lease-safe worker responsibilities while preserving one shared
+financial reconciliation path.
+
+### How I steered it
+
+I retained the outbox publisher for generic downstream notifications only. For
+the timeboxed demonstration, I chose a dedicated overpayment refund runner that
+periodically sends a signed core-banking callback to the local provider route,
+which simulates the provider's documented refund API. I kept its resulting
+financial effect inside the normal authenticated webhook and use-case flow.
+
+### Key decisions and lender-production flags
+
+- `outbox_publisher` publishes generic notification events; it does not initiate
+  or execute refunds.
+- `overpayment_refund_runner` claims durable core-banking refund requests at the
+  cadence configured by `OVERPAYMENT_REFUND_INTERVAL_MINUTES`. It uses leases,
+  bounded retries, and an idempotent callback reference.
+- The demo sends signed `overpayment.refunded` callbacks to
+  `/webhooks/payments/core_banking`; the provider adapter maps this to canonical
+  `transaction.refund`. This reduces only the overpayment balance and never the
+  loan balance.
+- The demo runner is limited to overpayments whose original credit came through
+  `core_banking`, because refund correlation currently requires the same provider
+  and merchant scope.
+- `lookup_retry_runner` is a separate scheduled driver. It claims due lookup
+  tasks and invokes `ReconcilePaymentUseCase`; no worker mutates financial
+  records directly.
+- Production must replace the local core-banking loopback with the provider's
+  documented outbound refund API and operate the refund request, outbox, retry,
+  and dead-letter monitoring/runbooks.

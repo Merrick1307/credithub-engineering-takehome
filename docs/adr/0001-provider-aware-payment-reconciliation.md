@@ -862,6 +862,29 @@ authentication; lookup is mandatory when configured and supported.
   initiation/disbursement may remain external; this service processes the
   resulting provider webhook and records its outcome.
 
+## Amendment: automated overpayment refund delivery and lookup retries
+
+The transactional outbox publishes generic post-commit downstream notifications
+only; it does not drive overpayment refunds. A core-banking overpayment instead
+creates a separate durable refund-request work record. The scheduled refund
+runner claims those records using leases at an environment-configured interval
+and never writes a loan, ledger, payment event, or overpayment projection
+directly. A successful provider refund confirmation re-enters through the normal
+authenticated provider boundary as canonical `transaction.refund`, which changes
+only the overpayment balance. It is never represented as
+`transaction.reversal`, because a reversal can compensate a repayment component
+and reopen a loan.
+
+For the timeboxed demo, the implementation plan may use a signed core-banking
+loopback as a test double. Production replaces that adapter with the documented
+outbound core-banking refund API without changing the durable command,
+idempotency, retry, or confirmation rules.
+
+The scheduled lookup-retry runner is an accepted driving adapter alongside the
+staff retry command. It claims retries using leases and invokes the same
+`ReconcilePaymentUseCase`; it does not implement reconciliation or mutate
+financial records directly.
+
 ## Remaining configuration decisions
 
 1. Whether each provider's payment reference is unique per merchant, per

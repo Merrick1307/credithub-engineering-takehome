@@ -122,9 +122,11 @@ written:
     from `transaction.reversal`: it must never compensate a repayment component
     or reopen a loan.
 13. For the timeboxed core-banking demo, a newly created core-banking
-    overpayment writes an `overpayment.refund.requested.v1` outbox command. The
-    outbox worker POSTs a signed, provider-native test callback to this service's
-    own `POST /webhooks/payments/core_banking` route using
+    overpayment creates one durable `overpayment_refund_request`, separate from
+    the generic notification outbox. The scheduled refund runner claims due
+    requests at most once per `OVERPAYMENT_REFUND_INTERVAL_MINUTES` interval and
+    POSTs a signed, provider-native test callback to this service's own
+    `POST /webhooks/payments/core_banking` route using
     `event: overpayment.refunded`, a new `notification_id`, the original
     payment's `original_notification_id`, and the requested refund amount. The
     core-banking normalizer maps that label to canonical `transaction.refund`.
@@ -472,11 +474,13 @@ app/
   adapters/providers/nibss_gsi.py
   adapters/providers/core_banking.py
   adapters/persistence/sqlalchemy_repositories.py
-  adapters/messaging/core_banking_refund_http.py
+  adapters/messaging/http_webhook_publisher.py
+  adapters/providers/core_banking_refund_client.py
   infrastructure/crypto.py
   infrastructure/secure_xml.py
   infrastructure/redis_idempotency.py
   workers/outbox_publisher.py
+  workers/overpayment_refund_runner.py
   workers/lookup_retry_runner.py
 ```
 
@@ -663,29 +667,41 @@ not duplicate the admin controller's reconciliation logic.
 Exit criteria: transaction-level acceptance and concurrency tests prove all
 financial invariants on PostgreSQL.
 
-### Milestone 4 - Publish core-banking overpayment refunds through the outbox
+### Milestone 4 - Publish generic downstream events and run scheduled core-banking refunds
 
 Tasks:
 
-- When a core-banking credit creates an overpayment, insert one
-  `overpayment.refund.requested.v1` outbox row in the same transaction. Its
-  fixed-point JSON envelope contains the outbox ID/message ID, the originating
-  payment and overpayment IDs/references, merchant scope, currency, remaining
-  refund amount, and correlation ID; exclude secrets and raw payloads.
+- Write generic `payment.reconciled.v1`, `payment.reversed.v1`, and
+  `overpayment.refunded.v1` notifications to the transactional outbox in the
+  same financial transaction. Use one fixed-point JSON envelope containing the
+  message ID, current/original event, provider, loan and overpayment identifiers,
+  component amounts/deltas, outcome, occurrence time, and correlation ID;
+  exclude secrets and raw payloads.
 - Extend outbox persistence with `status`, `available_at`, `lease_until`,
   `lease_owner`, `attempts`, `last_error`, and `published_at`; index due,
   unpublished rows. Claims use PostgreSQL row locking with `SKIP LOCKED`.
 - Implement `app/workers/outbox_publisher.py` as a separately deployable polling
-  process. It claims a bounded batch in a short transaction, POSTs outside that
-  transaction, then records success or a redacted failure in a new transaction.
-  Worker crashes are recovered by lease expiry; failures use bounded exponential
-  backoff and eventually create a visible operational issue/dead-letter alert.
-- Implement `CoreBankingRefundHttpPublisher` as the demo delivery adapter. It
-  sends the configured internal token and a JSON callback to
-  `/webhooks/payments/core_banking` with `event: overpayment.refunded` and a
-  unique notification ID derived from the outbox event. A `200` response whose
-  reconciliation result is `applied` completes the outbox row. A business
-  rejection is terminal and opens an issue; transport/`5xx` failures retry.
+  process for those generic notifications. It claims a bounded batch in a short
+  transaction, publishes through a configured generic HTTP webhook adapter
+  outside that transaction, then records success or a redacted failure in a new
+  transaction. Worker crashes are recovered by lease expiry; failures use bounded
+  exponential backoff and eventually create a visible operational issue/dead-letter
+  alert.
+- Add a durable `overpayment_refund_requests` work table with the original
+  payment/overpayment, amount, a unique callback reference, due time, attempt
+  count, lease, error, and final outcome. Creating a core-banking overpayment
+  inserts its request atomically with the financial decision; it does not use
+  `outbox_events`.
+- Implement `app/workers/overpayment_refund_runner.py` as a separately deployable
+  periodic process. `OVERPAYMENT_REFUND_INTERVAL_MINUTES` controls its polling
+  cadence. The runner claims a bounded batch with PostgreSQL leases, POSTs
+  outside the transaction through `CoreBankingRefundClient`, and records success,
+  retry/backoff, or terminal issue in a separate short transaction.
+- The demo client sends the configured internal token and a JSON callback to
+  `/webhooks/payments/core_banking` with `event: overpayment.refunded` and the
+  request's unique notification ID. A `200` response whose reconciliation result
+  is `applied` completes the refund request. A business rejection is terminal and
+  opens an issue; transport/`5xx` failures retry.
 - Do not use `payment.reversed` / `transaction.reversal` for this flow. Those
   actions compensate the original credit's repayment components and can reopen a
   loan. The loopback's provider-native `overpayment.refunded` label must
@@ -694,10 +710,11 @@ Tasks:
   replaced by the documented core-banking outbound refund API; the durable
   command, idempotency key, retry, and confirmation semantics remain unchanged.
 
-Exit criteria: a core-banking overpayment commits exactly one refund command;
-the worker redelivers it safely after failure; its signed loopback refund appends
-one refund ledger row without changing the loan; and duplicate worker delivery
-cannot produce a second refund.
+Exit criteria: generic downstream publication is durable and independently
+recoverable; a core-banking overpayment creates exactly one refund request; the
+scheduled runner redelivers it safely after failure; its signed loopback refund
+appends one refund ledger row without changing the loan; and duplicate worker
+delivery cannot produce a second refund.
 
 ### Milestone 5 - Build the admin reconciliation and issues panel
 
@@ -835,9 +852,10 @@ data.
 | Partial/duplicate/already-reversed reversal | Unsupported partial is quarantined; exact duplicate replays; a second distinct full reversal is rejected |
 | Partial overpayment refund | New refund event and `overpayment_refund` ledger row; `refunded_amount` increases; status remains `active`; no loan change |
 | Final overpayment refund | New refund event and ledger row consume remaining amount; status becomes `refunded`; no loan change |
-| Core-banking refund loopback | A committed core-banking overpayment creates one refund-request outbox command; the worker posts signed `overpayment.refunded` with a unique notification ID and the original notification ID; reconciliation appends one refund row and leaves the loan unchanged |
-| Duplicate core-banking refund delivery | The same outbox command/callback reference replays idempotently; no second ledger row or refund projection change |
-| Outbox transport failure or worker crash | Refund command remains unpublished or its expired lease becomes claimable; loan and overpayment remain unchanged until a successful authenticated refund callback |
+| Core-banking refund loopback | A committed core-banking overpayment creates one durable refund request; the scheduled runner posts signed `overpayment.refunded` with a unique notification ID and the original notification ID; reconciliation appends one refund row and leaves the loan unchanged |
+| Duplicate core-banking refund delivery | The same refund-request/callback reference replays idempotently; no second ledger row or refund projection change |
+| Refund-runner transport failure or crash | The refund request remains due or its expired lease becomes claimable; loan and overpayment remain unchanged until a successful authenticated refund callback |
+| Generic outbox transport failure or crash | The generic notification remains unpublished or its expired lease becomes claimable; committed financial facts remain unchanged |
 | Refund exceeds remaining or mismatches original/provider/currency | Quarantined with reason; no financial mutation |
 | Pending/failed reversal or refund callback | Delivery/operational fact only; no financial mutation |
 | Audit/outbox insert failure | Entire financial transaction rolls back |
@@ -913,8 +931,8 @@ leave explicit seams, rather than provide four superficial provider branches.
 - one authenticated reversal fixture that appends a compensating ledger row and
   one overpayment-refund fixture that appends a ledger row and updates only the
   overpayment projection, not the loan;
-- a durable outbox worker that drives the signed core-banking refund loopback
-  for core-banking overpayments, plus durable lookup-retry tasks with both an
+- a durable generic outbox publisher, a lease-safe scheduled core-banking
+  overpayment-refund runner, and durable lookup-retry tasks with both an
   authorized, audited admin retrigger path and a lease-safe scheduled runner;
 - focused PostgreSQL money and race tests; SQLite, if retained, is used only for
   non-authoritative smoke tests; and
@@ -925,7 +943,7 @@ leave explicit seams, rather than provide four superficial provider branches.
 - real Fincra, NIBSS GSI, and lender/core-banking contracts;
 - encrypted provider configuration with vault/KMS injection and rotation;
 - Redis completed-idempotency-result cache and replacement of the demo
-  core-banking loopback adapter with the real outbound refund API;
+  core-banking loopback refund client with the real outbound refund API;
 - full GSI/source-account mapping and operator resolution workflow;
 - retention/redaction controls, alerts, runbooks, and production load/failure
   testing.
