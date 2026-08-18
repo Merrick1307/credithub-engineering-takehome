@@ -1,9 +1,17 @@
 # Payment reconciliation implementation plan
 
-This plan implements [ADR-001](adr/0001-provider-aware-payment-reconciliation.md)
-against the current FastAPI/SQLAlchemy/React repository. It separates the
+This plan implements [ADR-001](adr/0001-provider-aware-payment-reconciliation.md) with
+[ADR-002](adr/0002-timeboxed-reconciliation-persistence-and-infrastructure-boundaries.md)
+amendments against the current FastAPI/SQLAlchemy/React repository. It separates the
 smallest demonstrable vertical slice from production hardening so the existing
 one-to-two-day take-home timebox remains honest.
+
+> **For This Timeboxed implementation, note:** the submitted slice keeps provider
+> configuration in an in-memory demo registry and uses PostgreSQL canonical-event
+> uniqueness, immutable fingerprints, transactions, and row locking as the
+> authoritative idempotency/concurrency boundary. Encrypted provider credential
+> storage and a Redis completed-result cache remain production hardening items.
+> Neither is required for financial correctness in the submitted implementation.
 
 ## 1. Intended outcome
 
@@ -20,15 +28,15 @@ actionable issues are exposed to an authenticated admin dashboard.
 The guarantee is **effectively-once financial application on top of at-least-once
 webhook delivery**. The API does not claim network-level exactly-once delivery.
 
-## 2. Current baseline and required change
+## 2. Original baseline and target change
 
-| Concern | Current repository | Target |
+| Concern | Original repository | Target |
 | --- | --- | --- |
 | Webhook | `POST /webhooks/payments` returns `501` | Provider-routed, signed endpoint with a temporary compatibility alias if needed |
-| Authentication | Shared constant token; also embedded in the browser | Provider signature/equivalent authentication; no webhook secret in frontend |
+| Authentication | Shared constant token; also embedded in the browser | Provider signature/equivalent authentication; provider-native secrets remain server-side; the legacy demo token is retained only for the compatibility simulator |
 | Input | One JSON-only, fixed `PaymentIn` model | Provider-aware JSON/XML decoding, provider DTO, then one canonical JSON-compatible DTO with extras in JSONB metadata |
 | Money | SQLAlchemy `Float` and Python `float` | `decimal.Decimal` throughout Python and `NUMERIC/DECIMAL` throughout PostgreSQL |
-| Identity | `external_ref` is not unique | Provider-scoped economic identity, immutable fingerprint, durable idempotency row, DB constraints |
+| Identity | `external_ref` is not unique | Provider-scoped economic identity, immutable fingerprint, DB uniqueness/locking, with an optional completed-result cache as a production fast path |
 | Concurrency | No transaction or row lock | PostgreSQL transaction, unique claim, `SELECT FOR UPDATE` on loan |
 | History | Mutable loan aggregate plus basic `Repayment` | Append-only repayment decision journal with before/after balance |
 | Overpayment | README says reject whole event | Apply outstanding amount and record the remainder in both the ledger and an `active` overpayment projection; do the same for the full receipt on a non-active loan |
@@ -149,12 +157,17 @@ conflict with the requested database uniqueness defense.
 
 ### Redis scope
 
-Redis is only the completed-idempotency-result cache. After PostgreSQL commits,
-the application caches `identity key -> fingerprint + stored response` with a
-TTL so an exact replay can be answered quickly. Redis does not own the durable
-idempotency record, perform loan locking, cache an authoritative loan balance,
-or decide whether a payment is applied. Every miss, mismatch, eviction, or Redis
-failure uses the PostgreSQL path.
+Redis is an optional completed-idempotency-result cache and is not required for
+financial correctness. The timeboxed implementation relies on PostgreSQL
+canonical-event uniqueness, immutable fingerprints, transactions, and loan-row
+locking as the authoritative idempotency and concurrency boundary.
+
+A production deployment can add Redis as a fast path after a successful
+PostgreSQL commit, caching `identity key -> fingerprint + stored response` with a
+TTL so exact redeliveries can be answered without repeating the full database
+lookup path. A miss, mismatch, eviction, concurrent cache miss, or Redis outage
+must fall back to PostgreSQL. Redis must not own durable event identity, lock a
+loan, hold an authoritative loan balance, or decide whether money is applied.
 
 ## 4. Target request sequence
 
@@ -165,13 +178,13 @@ sequenceDiagram
     participant API as Webhook controller
     participant Adapter as Provider adapter
     participant Lookup as Provider lookup API
-    participant Cache as Redis idempotency cache
+    participant Cache as Redis completed-result cache (optional)
     participant DB as PostgreSQL
     participant Worker as Outbox worker
 
     Rail->>API: POST /webhooks/payments/{provider}<br/>raw body, headers
-    API->>DB: Load encrypted provider configuration
-    API->>Adapter: Decrypt scoped config and verify raw signature
+    API->>API: Resolve configured provider credentials
+    API->>Adapter: Verify raw signature using scoped provider config
 
     alt Signature invalid
         API->>DB: Append safe invalid-signature delivery record
@@ -199,14 +212,17 @@ sequenceDiagram
                 API->>DB: Append non-actionable delivery
                 API-->>Rail: 200 acknowledged, no loan mutation
             else Final successful financial event
-                API->>Cache: GET cached fingerprint and completed result
-                alt Cache hit and fingerprint matches
+                opt Redis completed-result cache is configured
+                    API->>Cache: GET cached fingerprint and completed result
+                    Cache-->>API: Cached result or miss
+                end
+                alt Optional cache hit and fingerprint matches
                     API->>DB: Append duplicate delivery fact
                     API-->>Rail: 200 stored result, replay=true
-                else Cache miss or fingerprint mismatch
-                    API->>DB: BEGIN and claim unique idempotency key
+                else No cache, cache miss, or fingerprint mismatch
+                    API->>DB: BEGIN and check/claim canonical event identity
                     alt Existing identity and same fingerprint
-                        DB-->>API: Stored committed result
+                        DB-->>API: Existing committed event/result
                         API->>DB: Append duplicate delivery fact and COMMIT
                         API-->>Rail: 200 stored result, replay=true
                     else Existing identity and different fingerprint
@@ -218,9 +234,11 @@ sequenceDiagram
                         API->>DB: Calculate outcome; insert/link delivery and final event
                         API->>DB: Insert event-kind-specific ledger component rows
                         API->>DB: Update loan or overpayment projection as applicable
-                        API->>DB: Insert audit and outbox rows, finalize idempotency
+                        API->>DB: Insert audit and outbox rows
                         API->>DB: COMMIT
-                        API->>Cache: SET completed result with TTL
+                        opt Redis completed-result cache is configured
+                            API->>Cache: SET completed result with TTL
+                        end
                         API-->>Rail: 200 committed result
                         DB-->>Worker: Poll unpublished outbox rows
                         Worker-->>Worker: Publish canonical financial result event
@@ -320,7 +338,7 @@ provider callbacks stop before this flow and remain delivery/operational facts.
 ```mermaid
 flowchart LR
     RAW["Raw bytes + headers"] --> AUTH["Provider authentication<br/>raw-body signature and replay window"]
-    CFG["Encrypted provider config"] --> DEC["Scoped decrypt helper"] --> AUTH
+    CFG["Provider config<br/>demo registry now; encrypted store in production"] --> DEC["Scoped credential resolver"] --> AUTH
     AUTH --> MEDIA{Provider-approved Content-Type}
     MEDIA -- JSON --> JD[Strict JSON decoder]
     MEDIA -- XML --> XD["Hardened XML decoder<br/>no DTD, XXE, or network resolution"]
@@ -391,10 +409,14 @@ Tasks:
 - Serialize API/JSONB/outbox money as fixed-point strings and reject excessive
   decimal scale instead of silently rounding. Never construct a value with
   `Decimal(float)`.
-- Add `providers`, `provider_credentials`, `webhook_deliveries`,
+- Add the core durable financial/operational tables: `webhook_deliveries`,
   `provider_lookup_retries`, `loan_source_accounts`, `gsi_requests`,
-  `payment_events`, `idempotency_records`, `repayment_ledger`, `overpayments`,
-  `reconciliation_issues`, and `outbox_events`.
+  `payment_events`, `repayment_ledger`, `overpayments`, `reconciliation_issues`,
+  and `outbox_events`. In the timeboxed slice, provider configuration remains in
+  the demo registry and `payment_events` canonical identity/fingerprint is the
+  durable idempotency record. Production hardening can introduce encrypted
+  `provider_credentials` storage and a separate `idempotency_records` workflow
+  table behind the same ports if operational needs justify them.
 - Give payment events first-class `provider_event_type`, canonical `event_kind`,
   `event_reference`, `original_payment_reference`, and optional
   `original_payment_event_id`.
@@ -467,7 +489,7 @@ app/
   domain/enums.py
   ports/provider.py
   ports/repositories.py
-  ports/idempotency.py
+  ports/idempotency.py                  # optional cache/workflow seam
   ports/outbox.py
   adapters/providers/paystack.py
   adapters/providers/fincra.py
@@ -476,9 +498,9 @@ app/
   adapters/persistence/sqlalchemy_repositories.py
   adapters/messaging/http_webhook_publisher.py
   adapters/providers/core_banking_refund_client.py
-  infrastructure/crypto.py
+  infrastructure/crypto.py              # production credential seam
   infrastructure/secure_xml.py
-  infrastructure/redis_idempotency.py
+  infrastructure/redis_idempotency.py    # optional production fast path
   workers/outbox_publisher.py
   workers/overpayment_refund_runner.py
   workers/lookup_retry_runner.py
@@ -522,8 +544,12 @@ Tasks:
   `not_supported` results. Classify provider-specific HTTP/error codes in the
   adapter, not in the domain use case. Provide the requested dummy lookup adapter
   for local tests.
-- Implement a versioned AES-GCM credential helper. Load the key-encryption key
-  from environment locally and document vault/KMS injection in deployment.
+- For the timeboxed slice, use deterministic development credentials through the
+  provider registry so authentication paths can be exercised locally without
+  pretending to provide production secret management. Keep credential access
+  behind a replaceable boundary. Production hardening should add versioned
+  AES-GCM credential encryption, with a locally injected key-encryption key and
+  vault/KMS-backed key management, rotation, and scoped decryption in deployment.
 - Resolve GSI events only through a unique successful `gsi_requests` correlation;
   validate provider/request reference, amount/currency, and expected state.
 - Normalize every provider credit/reversal/refund label and correlation field in
@@ -557,26 +583,25 @@ reconciliation implementation.
 Within the transaction, use this lock order consistently:
 
 ```text
-1. claim idempotency identity
+1. check/claim canonical event identity under the database unique constraint
 2. resolve and lock GSI/mapping row when applicable
 3. lock loan row
 4. lock original ledger and overpayment rows when applicable
 5. calculate the final event-kind decision
 6. insert the canonical financial event once with final status
 7. insert/link the append-only delivery and append ledger/overpayment/audit/outbox rows
-8. update mutable projections and finalize stored response
+8. update mutable projections and finalize the reconciliation result
 ```
 
 Conceptual algorithm:
 
 ```text
 BEGIN
-  INSERT idempotency_record(key, fingerprint, state='processing')
-  ON CONFLICT DO NOTHING
+  existing = SELECT payment_event by canonical identity
 
-  if another row owns the key:
-      compare fingerprint
-      return its committed result, or persist identity-conflict issue
+  if existing:
+      compare immutable fingerprint
+      return/reconstruct its committed result, or persist identity-conflict issue
 
   if event_kind == transaction.credit:
       resolve source to exactly one loan
@@ -604,25 +629,27 @@ BEGIN
   persist the prepared ledger/loan/overpayment projection changes as applicable
   append audit + issue/outbox as applicable
 
-  store complete response in idempotency_record
+  finalize the payment_event/reconciliation result
 COMMIT
-cache completed idempotency fingerprint/response in Redis after commit
+optionally cache the completed fingerprint/response after commit when a Redis
+idempotency adapter is configured
 ```
 
 Important failure behavior:
 
 - A database error rolls back the event, balance, ledger, overpayment/issue,
-  audit, idempotency result, and outbox together. Return retryable `5xx`.
+  audit, and outbox together. Return retryable `5xx`.
 - A transient/configuration provider lookup failure runs a short persistence
   transaction that commits the delivery, unique retry task, and issue before the
   webhook is acknowledged. If that commit fails, return `503`; if it succeeds,
   do not also ask the provider to redeliver.
 - A duplicate webhook while a lookup retry is unresolved links another delivery
   to the existing task rather than creating another retry or payment event.
-- A Redis read/write failure changes only latency. Log it and continue with the
-  database path.
-- A concurrent duplicate blocks on the unique claim until the winner commits or
-  rolls back, then returns the committed result or takes over after rollback.
+- If the optional Redis cache is enabled, a Redis read/write failure changes only
+  latency. Log it and continue with the database path.
+- A concurrent duplicate is resolved by the canonical event unique constraint.
+  After the winner commits, the loser reads/reconstructs the committed result; if
+  the winner rolls back, the other transaction may proceed.
 - A distinct concurrent payment blocks on the same loan, reads the winner's new
   balance, and may become a partial/full overpayment rather than over-applying.
 - A reversal or refund uses the same loan-first lock order. A duplicate action
@@ -759,8 +786,11 @@ UI requirements:
 - reason codes have readable labels plus technical detail on drill-down;
 - color is not the only status indicator;
 - empty, loading, partial failure, and stale-data states are explicit; and
-- the existing synthetic webhook button is development-only and never carries a
-  provider secret in production JavaScript.
+- the existing synthetic webhook button is development-only. The compatibility
+  simulator may retain the supplied exercise token in local/demo JavaScript, but
+  provider-native webhook secrets must never be shipped to production browser
+  assets. A production simulator, if retained at all, should call a separately
+  authenticated admin-only endpoint.
 
 Exit criteria: an operator can identify, filter, and explain each requested issue
 type without querying the database manually.
@@ -775,7 +805,7 @@ Tasks:
   results, duplicates, identity conflicts, reconciliation outcomes, amount
   totals by currency, processing latency, DB lock wait, lookup retry backlog/age,
   reversal outcomes, refund outcomes and amounts, active-overpayment backlog/age,
-  unresolved issue age, Redis errors, and outbox lag.
+  unresolved issue age, optional Redis-cache errors (when enabled), and outbox lag.
 - Trace provider lookup and database phases without placing raw financial data in
   span attributes.
 - Alert on sustained signature failures, any identity conflict, invariant-check
@@ -815,8 +845,9 @@ data.
 - missing optional metadata and unexpected fields retained under sanitized
   metadata;
 - missing/invalid required fields rejected without invoking the use case;
-- encrypted provider credential round-trip, wrong key/AAD, corrupt ciphertext,
-  and key-version rotation;
+- production credential-adapter tests, when that adapter is introduced: encrypted
+  provider credential round-trip, wrong key/AAD, corrupt ciphertext, and
+  key-version rotation;
 - Python enum and database enum/check values remain aligned;
 - exact `Decimal` parsing and API-to-database-to-JSON round trips for `0.01`,
   large amounts, and the current seeded value `37333.33`; assert no binary float
@@ -858,7 +889,7 @@ data.
 | Refund exceeds remaining or mismatches original/provider/currency | Quarantined with reason; no financial mutation |
 | Pending/failed reversal or refund callback | Delivery/operational fact only; no financial mutation |
 | Audit/outbox insert failure | Entire financial transaction rolls back |
-| Redis unavailable | Same correct database result with higher latency only |
+| Redis unavailable (when optional cache is enabled) | Same correct database result with higher latency only |
 
 ### Concurrency tests on PostgreSQL
 
@@ -899,7 +930,9 @@ SQLite unit tests do not count as evidence for these race guarantees.
   and no FastAPI test client, proving that transport concerns are outside the
   application boundary;
 - route/provider selection, legacy alias deprecation, response status mapping,
-  replay flag, and no provider secret in built frontend assets;
+  replay flag, and no provider-native webhook secret in production frontend assets;
+  the supplied legacy demo token is permitted only in the local compatibility
+  simulator;
 - lookup-retry listing/retrigger requires an authorized admin, is lease-safe, and
   appends an audit record;
 - summary calculations use a fixed time window and correct denominators;
@@ -917,6 +950,11 @@ timebox. A credible submission should implement one complete path deeply and
 leave explicit seams, rather than provide four superficial provider branches.
 
 ### Must demonstrate in the timeboxed slice
+
+The timeboxed slice does not require Redis or encrypted credential persistence to
+claim financial correctness. PostgreSQL remains authoritative; the demo provider
+registry is acceptable for local authentication fixtures as long as production
+secrets are not represented as production-ready.
 
 - provider path parameter and one real/demo signed adapter;
 - provider adapter interface plus JSON and secure NIBSS-style XML fixture paths;
@@ -980,14 +1018,13 @@ The reconciliation layer is complete when:
 - exact, partial, full-overpayment, rejected, unknown, GSI-mapped, full-reversal,
   and partial/full-overpayment-refund paths obey the documented invariants;
 - transient/configuration lookup failures create one durable retry task and can
-  be safely retriggered by an authorized admin; terminal not-found results are
-  rejected without changing a loan;
+  be safely retriggered by an authorized admin or the retry runner; terminal 
+  not-found results are rejected without changing a loan;
 - every trusted payment, reversal, and refund decision is reconstructable from
   delivery, event, original-event link, ledger, overpayment, audit, and loan
   projection data;
-- secrets are encrypted at rest, injected safely, redacted, and rotatable;
-- the Redis idempotency-result cache and downstream broker can fail without
-  corrupting balances;
+- an optional Redis completed-result cache, if introduced, and downstream
+  delivery components can fail without corrupting balances;
 - the operator dashboard puts unresolved issues and their reasons first; and
 - production migrations, alerts, reconciliation checks, and runbooks have been
   exercised on production-like data.

@@ -1,8 +1,8 @@
 # ADR-001: Provider-aware, idempotent loan payment reconciliation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-17
-- **Scope:** Payment/reversal/refund ingestion, loan matching, reconciliation, overpayments, and operational reporting
+- **Amended by:** [ADR-002](./0002-timeboxed-reconciliation-persistence-and-infrastructure-boundaries.md)
 
 ## Context
 

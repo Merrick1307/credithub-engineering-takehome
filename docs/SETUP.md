@@ -30,6 +30,8 @@ One command run:
 ./run-local.sh
 ```
 
+or
+
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
