@@ -2,7 +2,7 @@
 
 This repository currently contains the design work for the reconciliation layer.
 The ADR and implementation plan have been completed; the application code has
-not yet been changed to implement them.
+now been implemented.
 
 ## The ADR
 
@@ -105,7 +105,7 @@ domain receives one canonical namespaced event kind.
   with real parallel transactions.
 - The one-to-two-day slice should demonstrate one complete provider path and the
   core correctness guarantees. Remaining provider integrations and production
-  hardening should be explicit follow-up work rather than superficial stubs.
+  hardening would be explicit follow-up work rather than superficial stubs.
 
 ## The implementation
 
@@ -125,9 +125,9 @@ migrations, and a Docker/PostgreSQL deployment configuration.
 
 AI helped translate the ADR and implementation plan into concrete package
 boundaries, repository interfaces, migrations, provider adapter templates,
-reconciliation tests, and the Docker/Alembic setup. It also helped identify the
-transactional outbox and lookup-retry records as durable seams for later
-background processing.
+reconciliation tests, and the Docker/Alembic setup. It also helped highlight
+while i reason through the transactional outbox and lookup-retry records as 
+durable seams for background processing.
 
 ### How I steered it
 
@@ -135,9 +135,10 @@ I kept the financial reconciliation decision synchronous in the webhook request
 and restricted asynchronous processing to non-financial follow-up work. I used
 the existing SQLAlchemy models as persistence projections while keeping domain
 money and canonical-event concepts separate. I added mock and core-banking
-adapters as demonstrable provider paths, without presenting them as verified
-production integrations, and kept the initial staff retry action manual and
-audited.
+adapters as demonstrable provider paths, without having to do real third-party
+production integrations (real integration/implementation is just a matter of
+swapping backends in provider registry), and kept the initial staff retry action
+manual and audited.
 
 ### Key decisions and lender-production flags
 
@@ -160,41 +161,42 @@ audited.
   under the SQLAlchemy persistence adapter; `audit.py` belongs with persistence;
   `auth.py` belongs with inbound authentication; `dependencies.py` belongs to
   the API layer; and `seed.py` belongs in an operational/scripts package.
-- Before lender production, implement and operate the outbox publisher, retry
-  scheduling/leases, real provider contract verification, secret management,
+- Before lender production, I'd implement and operate fully, the outbox publisher, 
+  retry scheduling/leases, real provider contract verification, secret management,
   PostgreSQL concurrency coverage, monitoring, and recovery runbooks.
 
 ## Background processing amendment
 
 ### My part
 
-I separated generic downstream publication from automatic overpayment refunds.
-The transactional outbox remains the durable source for generic post-commit
-notifications. Core-banking overpayments instead create their own durable refund
-work records, which a scheduled refund runner processes independently.
+The transactional outbox is the single durable dispatcher for both generic
+post-commit notifications and core-banking refund commands. The publisher routes
+each event type to its configured HTTP consumer; the refund orchestrator is a
+webhook consumer and never polls or claims the outbox itself.
 
 ### Assistance gotten from AI
 
-AI helped identify that using the generic outbox as both notification transport
+AI helped highlight that using the generic outbox as both notification transport
 and refund-command queue would blur two operational responsibilities. It helped
 define separate lease-safe worker responsibilities while preserving one shared
 financial reconciliation path.
 
 ### How I steered it
 
-I retained the outbox publisher for generic downstream notifications only. For
-the timeboxed demonstration, I chose a dedicated overpayment refund runner that
-periodically sends a signed core-banking callback to the local provider route,
-which simulates the provider's documented refund API. I kept its resulting
-financial effect inside the normal authenticated webhook and use-case flow.
+I retained the outbox publisher as the only process that claims and retries
+outbox rows. For the timeboxed demonstration, it routes
+`overpayment.refund.requested` to a dedicated refund webhook, whose orchestrator
+sends a signed core-banking callback to the local provider route. I kept its
+resulting financial effect inside the normal authenticated webhook and use-case
+flow.
 
 ### Key decisions and lender-production flags
 
-- `outbox_publisher` publishes generic notification events; it does not initiate
-  or execute refunds.
-- `overpayment_refund_runner` claims durable core-banking refund requests at the
-  cadence configured by `OVERPAYMENT_REFUND_INTERVAL_MINUTES`. It uses leases,
-  bounded retries, and an idempotent callback reference.
+- `outbox_publisher` publishes every durable event, routing refund commands to
+  the refund orchestrator and generic notifications to their downstream consumer.
+- `overpayment_refund_runner` is an internal HTTP consumer. It validates
+  `overpayment.refund.requested` and ignores all other event types; publisher
+  leases, retries, and the idempotent callback reference remain the boundary.
 - The demo sends signed `overpayment.refunded` callbacks to
   `/webhooks/payments/core_banking`; the provider adapter maps this to canonical
   `transaction.refund`. This reduces only the overpayment balance and never the
@@ -206,5 +208,47 @@ financial effect inside the normal authenticated webhook and use-case flow.
   tasks and invokes `ReconcilePaymentUseCase`; no worker mutates financial
   records directly.
 - Production must replace the local core-banking loopback with the provider's
-  documented outbound refund API and operate the refund request, outbox, retry,
-  and dead-letter monitoring/runbooks.
+  documented outbound refund API and operate the outbox, publisher retry, and
+  dead-letter monitoring/runbooks.
+
+
+## The frontend
+
+### My part
+
+I evolved the existing two-page React/Vite frontend (public servicing page and
+admin console with secret-based data loading) into a comprehensive operational
+dashboard. I stated an enhanced frontend requirements which provides paginated 
+views for reconciliation events, loans, overpayments, and provider-lookup retries, 
+with filtering by provider, status, kind, loan ID, and reference. It retains the 
+synthetic payment simulator for testing webhook delivery manual redelivery of events, 
+and in addition now includes detailed event drill-downs showing ledger components, 
+overpayment state, webhook deliveries, reconciliation issues, and audit history.
+
+### Assistance gotten from AI
+
+AI helped enhance the existing React/Vite structure, implement pagination logic,
+create the infinite scroll table components, and expand the dashboard layout.
+It also helped with the event detail modal.
+
+### How I steered it
+
+I kept the frontend as a pure client-side application that calls the existing
+FastAPI admin endpoints. I retained the admin token authentication pattern but
+required it as a 'login credential' to the new multi-page/tabs app. Once logged in,
+the admin then has access to all views and is able to perform all operations.
+for backward compatibility, i let the synthetic payment simulator keep using 
+the legacy `/webhooks/payments` endpoint.
+
+### Key decisions and lender-production flags
+
+- The frontend remains a client-side application; all financial mutations stay
+  server-side through authenticated API endpoints.
+- Synthetic payments and manual redelivery are staff-only actions protected by
+  the admin token and recorded in the audit log.
+- Event kind mappings (`transaction.credit`, `transaction.reversal`,
+  `transaction.refund`) and provider name mappings are client-side display
+  helpers; the canonical values remain authoritative in the backend.
+- Before lender production, I'd add proper authentication (OAuth/JWT), role-based
+  access control, input validation, rate limiting, CSRF protection, and
+  comprehensive error handling.

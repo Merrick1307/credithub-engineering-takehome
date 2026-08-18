@@ -9,8 +9,8 @@ so the feed isn't empty on first load. New payments arrive via the webhook (the
 
 import uuid
 
-from .db import Base, SessionLocal, engine
-from .models import Loan, LoanStatus, PaymentEvent, PaymentStatus, ProviderLookupRetry
+from app.adapters.persistence.db import Base, SessionLocal, engine
+from app.adapters.persistence.sqlalchemy_backend.models import Loan, LoanStatus, PaymentEvent, PaymentStatus, ProviderLookupRetry
 
 
 def seed() -> None:

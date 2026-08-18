@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import json
 
+from conftest import ACTIVE_LOAN_ID
+
 
 def _hmac_headers(payload: dict, secret: str) -> dict:
     raw = json.dumps(payload).encode("utf-8")
@@ -15,7 +17,7 @@ def _hmac_headers(payload: dict, secret: str) -> dict:
 
 def test_mock_token_provider_variant(client):
     payload = {
-        "transaction_id": "TOKEN-001", "amount": 2_000_000, "customer_id": "1",
+        "transaction_id": "TOKEN-001", "amount": 2_000_000, "customer_id": ACTIVE_LOAN_ID,
         "status": "success", "event_type": "payment", "metadata": {},
     }
     response = client.post(
@@ -28,7 +30,7 @@ def test_mock_token_provider_variant(client):
 
 def test_mock_major_unit_normalization_variant(client):
     payload = {
-        "transaction_id": "MAJOR-001", "amount": "20000.00", "customer_id": "1",
+        "transaction_id": "MAJOR-001", "amount": "20000.00", "customer_id": ACTIVE_LOAN_ID,
         "status": "success", "event_type": "payment", "metadata": {},
     }
     response = client.post(
@@ -37,12 +39,12 @@ def test_mock_major_unit_normalization_variant(client):
     )
     assert response.status_code == 200
     assert response.json()["reconciliation"]["gross_amount"] == "20000"
-    assert client.get("/loans/1").json()["outstanding"] == 36_000
+    assert client.get(f"/loans/{ACTIVE_LOAN_ID}").json()["outstanding"] == 36_000
 
 
 def test_core_banking_provider_template(client):
     payload = {
-        "notification_id": "CORE-001", "account_id": "1", "amount": "20000.00",
+        "notification_id": "CORE-001", "account_id": ACTIVE_LOAN_ID, "amount": "20000.00",
         "currency": "NGN", "status": "posted", "event": "payment.posted", "metadata": {},
     }
     response = client.post(
@@ -51,4 +53,4 @@ def test_core_banking_provider_template(client):
     )
     assert response.status_code == 200
     assert response.json()["event"]["status"] == "applied"
-    assert client.get("/loans/1").json()["outstanding"] == 36_000
+    assert client.get(f"/loans/{ACTIVE_LOAN_ID}").json()["outstanding"] == 36_000

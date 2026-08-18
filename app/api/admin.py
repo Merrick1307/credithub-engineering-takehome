@@ -13,14 +13,14 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import asc, desc
 
-from ..audit import record_audit
-from ..adapters.persistence.sqlalchemy_repositories import SQLAlchemyUnitOfWork
+from app.adapters.persistence.audit import record_audit
+from app.adapters.persistence.sqlalchemy_backend.sqlalchemy_repositories import SQLAlchemyUnitOfWork
 from ..application.reconcile_payment import ReconcilePaymentUseCase
-from ..dependencies import get_db
+from app.api.dependencies import get_db
 from ..domain.enums import EventKind
 from ..domain.models import CanonicalFinancialEvent, Money
-from ..models import (
-    AuditLog, OutboxEvent, Overpayment, PaymentEvent, ProviderLookupRetry,
+from app.adapters.persistence.sqlalchemy_backend.models import (
+    AuditLog, Overpayment, PaymentEvent, ProviderLookupRetry,
     ReconciliationIssue, Repayment, WebhookDelivery,
 )
 from .pagination import DEFAULT_PAGE_SIZE, chronological_page
@@ -119,7 +119,10 @@ def list_events(
 
 @router.get("/reconciliation/events/{event_id}")
 def event_detail(event_id: str, _: str = Depends(require_admin), db: Session = Depends(get_db)):
-    event = db.get(PaymentEvent, event_id)
+    try:
+        event = db.get(PaymentEvent, UUID(event_id))
+    except ValueError:
+        event = None
     if not event: raise HTTPException(status_code=404, detail="Event not found")
     overpayment = db.query(Overpayment).filter(Overpayment.payment_event_id == event.id).first()
     return {

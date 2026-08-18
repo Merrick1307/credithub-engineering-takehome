@@ -7,7 +7,7 @@ from sqlalchemy import pool
 from alembic import context
 
 # Import metadata from app models
-from app.models import Base
+from app.adapters.persistence.sqlalchemy_backend.models import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

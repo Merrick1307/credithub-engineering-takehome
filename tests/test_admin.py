@@ -2,8 +2,9 @@
 
 import json
 
-from app.db import SessionLocal
-from app.models import ProviderLookupRetry
+from app.adapters.persistence.db import SessionLocal
+from app.adapters.persistence.sqlalchemy_backend.models import ProviderLookupRetry
+from conftest import ACTIVE_LOAN_ID, CLOSED_LOAN_ID
 
 
 ADMIN = {"X-Admin-Token": "dev-admin-secret"}
@@ -15,8 +16,8 @@ def test_admin_endpoints_require_staff_token(client):
 
 
 def test_admin_summary_issues_events_and_detail(client):
-    client.post("/webhooks/payments", json={"external_ref": "ADMIN-PAID", "loan_id": 1, "amount": 20_000}, headers=WEBHOOK)
-    client.post("/webhooks/payments", json={"external_ref": "ADMIN-CLOSED", "loan_id": 2, "amount": 100}, headers=WEBHOOK)
+    client.post("/webhooks/payments", json={"external_ref": "ADMIN-PAID", "loan_id": ACTIVE_LOAN_ID, "amount": 20_000}, headers=WEBHOOK)
+    client.post("/webhooks/payments", json={"external_ref": "ADMIN-CLOSED", "loan_id": CLOSED_LOAN_ID, "amount": 100}, headers=WEBHOOK)
 
     summary = client.get("/admin/reconciliation/summary", headers=ADMIN)
     assert summary.status_code == 200
@@ -38,7 +39,7 @@ def test_admin_can_trigger_a_persisted_lookup_retry(client):
     payload = {
         "event_kind": "transaction.credit", "event_reference": "RETRY-001",
         "original_payment_reference": None, "gross_amount": "100.00", "currency": "NGN",
-        "provider_status": "succeeded", "merchant_scope": "1",
+        "provider_status": "succeeded", "merchant_scope": ACTIVE_LOAN_ID,
         "timestamp": "2026-08-17T10:00:00+00:00", "provider_metadata": {},
         "provider_event_type": "payment",
     }

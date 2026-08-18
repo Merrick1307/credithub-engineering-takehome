@@ -15,11 +15,10 @@ import hashlib
 from datetime import datetime
 import uuid
 
-from ..domain.models import CanonicalFinancialEvent
 from ..application.reconcile_payment import ReconcilePaymentUseCase
 from ..ports.providers import ProviderRegistry, ProviderDecoder, ProviderAuthenticator, ProviderNormalizer
 from ..ports.repositories import UnitOfWork
-from ..models import WebhookDelivery
+from app.adapters.persistence.sqlalchemy_backend.models import WebhookDelivery
 
 class PaymentWebhookController:
     """Controller for payment webhook ingestion."""

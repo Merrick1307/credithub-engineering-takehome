@@ -5,16 +5,13 @@ from fastapi import FastAPI, HTTPException, Request
 import hashlib
 import uuid
 
-from . import models  # noqa: F401 — register models on Base
-from .db import engine, SessionLocal
-from .api.loans import router as loans_router
-from .api.payments import router as payments_router
-from .api.admin import router as admin_router
-from .dependencies import set_session_factory
+from app.adapters.persistence.db import engine, SessionLocal
+from .api import router as api_router
+from app.api.dependencies import set_session_factory
 
 # Import new architecture
 from .application.reconcile_payment import ReconcilePaymentUseCase
-from .adapters.persistence.sqlalchemy_repositories import SQLAlchemyUnitOfWork
+from app.adapters.persistence.sqlalchemy_backend.sqlalchemy_repositories import SQLAlchemyUnitOfWork
 from .infrastructure.provider_registry import SimpleProviderRegistry, NoOpProviderLookup
 from .infrastructure.authenticators import TokenAuthenticator
 from .infrastructure.decoders import SimpleJsonDecoder
@@ -31,7 +28,7 @@ from .adapters.providers.core_banking import (
     CoreBankingDecoder,
     CoreBankingNormalizer,
 )
-from .models import WebhookDelivery
+from app.adapters.persistence.sqlalchemy_backend.models import WebhookDelivery
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -55,9 +52,7 @@ app = FastAPI(
     title="CreditHub take-home — loan servicing slice",
     lifespan=lifespan
 )
-app.include_router(loans_router)
-app.include_router(payments_router)
-app.include_router(admin_router)
+app.include_router(api_router)
 
 # Initialize new architecture components
 provider_registry = SimpleProviderRegistry()

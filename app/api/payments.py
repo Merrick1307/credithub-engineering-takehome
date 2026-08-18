@@ -8,8 +8,8 @@ The webhook is now implemented in main.py using the new architecture.
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from ..dependencies import get_db
-from ..models import PaymentEvent
+from app.api.dependencies import get_db
+from app.adapters.persistence.sqlalchemy_backend.models import PaymentEvent
 from .pagination import DEFAULT_PAGE_SIZE, chronological_page
 
 router = APIRouter()

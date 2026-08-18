@@ -21,13 +21,12 @@ from ..domain.enums import (
 )
 from ..domain.models import (
     Money,
-    LoanBalance,
     CanonicalFinancialEvent,
     ReconciliationResult,
 )
 from ..ports.repositories import UnitOfWork
 from ..ports.providers import ProviderRegistry, ProviderLookup
-from ..models import PaymentStatus
+from app.adapters.persistence.sqlalchemy_backend.models import PaymentStatus
 
 
 class ReconcilePaymentUseCase:
@@ -140,6 +139,11 @@ class ReconcilePaymentUseCase:
                         "reason": "provider_status_not_final_success",
                     },
                     correlation_id,
+                    idempotency_key=(
+                        f"non-actionable:{canonical_event.provider}:"
+                        f"{canonical_event.merchant_scope}:{canonical_event.event_kind.value}:"
+                        f"{canonical_event.event_reference}"
+                    ),
                 )
                 return ReconciliationResult(
                     event_id=None,
@@ -217,6 +221,16 @@ class ReconcilePaymentUseCase:
                 loan_status=None,
                 loan_outstanding=None,
             )
+
+        # Re-check after the loan lock. A concurrent redelivery may have
+        # passed the initial pre-lock identity check and then waited here.
+        locked_existing = self.uow.payment_events.get_event_by_identity(
+            event.provider, event.merchant_scope, event.event_kind, event.event_reference
+        )
+        if locked_existing:
+            if locked_existing.get("fingerprint") == self._make_fingerprint(event):
+                return self._build_result_from_stored(locked_existing, idempotent_replay=True)
+            return self._identity_conflict_result(event, locked_existing)
         
         # Step 2: Check loan status
         if loan.status != LoanStatus.active:
@@ -241,6 +255,7 @@ class ReconcilePaymentUseCase:
                 overpayment_balance_delta=event.gross_amount.amount,
                 overpayment_id=overpayment["id"],
             )
+            self._queue_core_banking_refund(event, overpayment, correlation_id)
             self.uow.payment_events.update_event_reconciliation(
                 event_id, loan_id, ReconciliationStatus.rejected,
                 ReconciliationReason.closed_loan_payment.value,
@@ -295,6 +310,7 @@ class ReconcilePaymentUseCase:
                 overpayment_balance_delta=overpaid_amount.amount,
                 overpayment_id=overpayment["id"],
             )
+            self._queue_core_banking_refund(event, overpayment, correlation_id)
             
             # Update loan
             self.uow.loans.update_loan_balance(
@@ -451,6 +467,14 @@ class ReconcilePaymentUseCase:
         if not loan:
             return self._reject_reversal(event, ReconciliationReason.unknown_loan)
 
+        locked_existing = self.uow.payment_events.get_event_by_identity(
+            event.provider, event.merchant_scope, event.event_kind, event.event_reference
+        )
+        if locked_existing:
+            if locked_existing.get("fingerprint") == self._make_fingerprint(event):
+                return self._build_result_from_stored(locked_existing, idempotent_replay=True)
+            return self._identity_conflict_result(event, locked_existing)
+
         for component in components:
             if component["entry_type"] == "overpayment":
                 overpayment = self.uow.overpayments.get_by_payment_event(original_event["id"])
@@ -570,6 +594,14 @@ class ReconcilePaymentUseCase:
         if not loan or not overpayment or event.gross_amount.amount > overpayment["remaining_amount"]:
             return self._reject_reversal(event, ReconciliationReason.refund_exceeds_balance)
 
+        locked_existing = self.uow.payment_events.get_event_by_identity(
+            event.provider, event.merchant_scope, event.event_kind, event.event_reference
+        )
+        if locked_existing:
+            if locked_existing.get("fingerprint") == self._make_fingerprint(event):
+                return self._build_result_from_stored(locked_existing, idempotent_replay=True)
+            return self._identity_conflict_result(event, locked_existing)
+
         event_id = self.uow.payment_events.record_event(
             provider=event.provider,
             merchant_scope=event.merchant_scope,
@@ -606,6 +638,50 @@ class ReconcilePaymentUseCase:
             loan_id=loan_id,
             loan_status=LoanStatus(loan.status.value),
             loan_outstanding=Money(Decimal(str(loan.outstanding)), event.gross_amount.currency),
+        )
+
+    def _queue_core_banking_refund(
+        self,
+        event: CanonicalFinancialEvent,
+        overpayment: dict,
+        correlation_id: str,
+    ) -> None:
+        """Create one refund command atomically with a core-banking excess.
+
+        This is deliberately a command, not a balance adjustment. A separate
+        worker asks the provider to refund and the signed provider callback is
+        the only path which consumes the overpayment.
+        """
+        if event.provider != "core_banking":
+            return
+        self.uow.outbox.record_outbox_event(
+            "overpayment.refund.requested",
+            {
+                "provider": event.provider,
+                "overpayment_id": str(overpayment["id"]),
+                "amount": str(overpayment["remaining_amount"]),
+                "currency": event.gross_amount.currency,
+                "account_id": event.merchant_scope,
+                "original_notification_id": event.event_reference,
+                # Persist the provider-event timestamp so a crash after an HTTP
+                # response causes an exact idempotent callback on retry.
+                "occurred_at": event.timestamp.isoformat(),
+            },
+            correlation_id,
+            idempotency_key=f"core-banking-refund:{overpayment['id']}",
+        )
+
+    @staticmethod
+    def _identity_conflict_result(
+        event: CanonicalFinancialEvent,
+        existing: dict,
+    ) -> ReconciliationResult:
+        return ReconciliationResult(
+            event_id=existing.get("id"), status=ReconciliationStatus.rejected,
+            reason=ReconciliationReason.identity_conflict, gross_amount=event.gross_amount,
+            applied_amount=Money(Decimal(0), event.gross_amount.currency),
+            overpaid_amount=Money(Decimal(0), event.gross_amount.currency),
+            loan_id=None, loan_status=None, loan_outstanding=None,
         )
     
     def _reject_identity_conflict(

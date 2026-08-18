@@ -2,10 +2,10 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID
 
-from ..dependencies import get_db
-from ..models import Loan
+from app.api.dependencies import get_db
+from app.adapters.persistence.sqlalchemy_backend.models import Loan
 from .pagination import DEFAULT_PAGE_SIZE, chronological_page
 
 router = APIRouter()
@@ -31,7 +31,10 @@ def list_loans(cursor: str | None = None, limit: int = DEFAULT_PAGE_SIZE, db=Dep
 
 @router.get("/loans/{loan_id}")
 def get_loan(loan_id: str, db=Depends(get_db)):
-    loan = db.get(Loan, loan_id)
+    try:
+        loan = db.get(Loan, UUID(loan_id))
+    except ValueError:
+        loan = None
     if loan is None:
         raise HTTPException(status_code=404, detail="loan not found")
     return _loan_out(loan)

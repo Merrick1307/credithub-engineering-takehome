@@ -171,27 +171,6 @@ alembic downgrade -1
 
 5. **Commit** the migration file along with code changes
 
-### Manual Migration Example
-
-For complex changes (e.g., data migrations), write a manual migration:
-
-```python
-# alembic/versions/002_add_customer_id.py
-from alembic import op
-import sqlalchemy as sa
-
-revision = '002'
-down_revision = '001'
-
-def upgrade():
-    op.add_column('loans', sa.Column('customer_id', sa.Integer(), nullable=True))
-    op.create_index('ix_loans_customer_id', 'loans', ['customer_id'])
-
-def downgrade():
-    op.drop_index('ix_loans_customer_id', table_name='loans')
-    op.drop_column('loans', 'customer_id')
-```
-
 ## Dependency Injection
 
 The `app/dependencies.py` module provides a single `get_db()` dependency:

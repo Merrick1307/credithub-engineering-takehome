@@ -16,12 +16,19 @@ from ...ports.providers import ProviderAuthenticator, ProviderDecoder, ProviderN
 
 
 class CoreBankingAuthenticator(ProviderAuthenticator):
-    """Authenticate an internal callback using a configured bearer token."""
+    """Authenticate signed callbacks, with legacy token compatibility."""
 
     def verify_signature(self, provider: str, raw_body: bytes, headers: dict, config: dict) -> bool:
         supplied = headers.get("x-core-banking-token", "")
         expected = config.get("secret_key", "")
-        return bool(expected) and hmac.compare_digest(supplied, expected)
+        signature = headers.get("x-core-banking-signature", "")
+        expected_signature = hmac.new(expected.encode(), raw_body, "sha256").hexdigest() if expected else ""
+        # Token support is retained for existing inbound bank callbacks while
+        # loopback refunds use the signed-body form.
+        return bool(expected) and (
+            hmac.compare_digest(signature, expected_signature)
+            or hmac.compare_digest(supplied, expected)
+        )
 
 
 class CoreBankingDecoder(ProviderDecoder):

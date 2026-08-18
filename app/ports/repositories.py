@@ -187,6 +187,7 @@ class OutboxRepository(ABC):
         event_type: str,
         payload: dict,
         correlation_id: str,
+        idempotency_key: Optional[str] = None,
     ) -> int:
         """Record an outgoing event in the outbox (idempotent publish)."""
         pass

@@ -25,6 +25,9 @@ services:
     environment:
       DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-credithub}:${POSTGRES_PASSWORD:-credithub}@db:5432/${POSTGRES_DB:-credithub}"
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
+      # Increment with each Alembic revision so Compose recreates this one-shot
+      # service instead of reusing a completed container from an older build.
+      EXPECTED_ALEMBIC_REVISION: "005"
     depends_on:
       db:
         condition: service_healthy
@@ -62,6 +65,58 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+
+  outbox-publisher:
+    build:
+      context: ..
+      dockerfile: build/docker/Dockerfile
+      target: api
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-credithub}:${POSTGRES_PASSWORD:-credithub}@db:5432/${POSTGRES_DB:-credithub}"
+      DOWNSTREAM_NOTIFICATION_URL: ${DOWNSTREAM_NOTIFICATION_URL:-}
+      OUTBOX_EVENT_URLS: '{"overpayment.refund.requested":"http://overpayment-refund-runner:8138/webhooks/outbox/overpayment-refunds"}'
+      OUTBOX_PUBLISH_INTERVAL_SECONDS: ${OUTBOX_PUBLISH_INTERVAL_SECONDS:-5}
+      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
+    depends_on:
+      api:
+        condition: service_healthy
+      overpayment-refund-runner:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.outbox_publisher"]
+
+  overpayment-refund-runner:
+    build:
+      context: ..
+      dockerfile: build/docker/Dockerfile
+      target: api
+    environment:
+      CORE_BANKING_LOOPBACK_URL: "http://api:8137/webhooks/payments/core_banking"
+      CORE_BANKING_WEBHOOK_TOKEN: ${CORE_BANKING_WEBHOOK_TOKEN:-core-banking-token-for-testing}
+    depends_on:
+      api:
+        condition: service_healthy
+    expose:
+      - "8138"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8138/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    command: ["uvicorn", "app.workers.overpayment_refund_runner:app", "--host", "0.0.0.0", "--port", "8138"]
+
+  lookup-retry-runner:
+    build:
+      context: ..
+      dockerfile: build/docker/Dockerfile
+      target: api
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-credithub}:${POSTGRES_PASSWORD:-credithub}@db:5432/${POSTGRES_DB:-credithub}"
+      LOOKUP_RETRY_INTERVAL_SECONDS: ${LOOKUP_RETRY_INTERVAL_SECONDS:-30}
+      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.lookup_retry_runner"]
 
   frontend:
     build:

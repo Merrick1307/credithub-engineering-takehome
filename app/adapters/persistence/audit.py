@@ -8,7 +8,7 @@ commit here; the caller owns the transaction boundary.
 
 from sqlalchemy.orm import Session
 
-from .models import AuditLog
+from app.adapters.persistence.sqlalchemy_backend.models import AuditLog
 
 
 def record_audit(

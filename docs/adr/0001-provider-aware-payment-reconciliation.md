@@ -864,21 +864,25 @@ authentication; lookup is mandatory when configured and supported.
 
 ## Amendment: automated overpayment refund delivery and lookup retries
 
-The transactional outbox publishes generic post-commit downstream notifications
-only; it does not drive overpayment refunds. A core-banking overpayment instead
-creates a separate durable refund-request work record. The scheduled refund
-runner claims those records using leases at an environment-configured interval
-and never writes a loan, ledger, payment event, or overpayment projection
-directly. A successful provider refund confirmation re-enters through the normal
-authenticated provider boundary as canonical `transaction.refund`, which changes
-only the overpayment balance. It is never represented as
+The transactional outbox is the single durable dispatch queue for generic
+post-commit notifications and refund commands. The outbox publisher is the only
+process that leases and retries rows. It routes exact event types through
+`OUTBOX_EVENT_URLS`, falling back to `DOWNSTREAM_NOTIFICATION_URL` for unmapped
+notification types. A core-banking overpayment creates one
+`overpayment.refund.requested` command atomically with the financial decision;
+the publisher delivers that command to the refund orchestrator webhook. The
+orchestrator validates the event type and ignores any other event; it never polls
+or claims `outbox_events`. On a valid command it never writes a loan, ledger,
+payment event, or overpayment projection directly. A successful provider refund
+confirmation re-enters through the normal authenticated provider boundary as
+canonical `transaction.refund`, which changes only the overpayment balance. It is never represented as
 `transaction.reversal`, because a reversal can compensate a repayment component
 and reopen a loan.
 
-For the timeboxed demo, the implementation plan may use a signed core-banking
-loopback as a test double. Production replaces that adapter with the documented
-outbound core-banking refund API without changing the durable command,
-idempotency, retry, or confirmation rules.
+For the timeboxed demo, the refund webhook uses a signed core-banking loopback
+as a test double. Production replaces that adapter with the documented outbound
+core-banking refund API without changing the durable command, publisher retry,
+idempotency, or confirmation rules.
 
 The scheduled lookup-retry runner is an accepted driving adapter alongside the
 staff retry command. It claims retries using leases and invokes the same

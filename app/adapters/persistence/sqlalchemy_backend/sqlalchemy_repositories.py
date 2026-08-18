@@ -2,21 +2,22 @@
 
 from typing import Optional, List
 import uuid
+import json
 from decimal import Decimal
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_
 
-from ...domain.enums import LoanStatus, EventKind, ReconciliationStatus
-from ...ports.repositories import (
+from app.domain.enums import LoanStatus, EventKind, ReconciliationStatus
+from app.ports.repositories import (
     LoanRepository,
     PaymentEventRepository,
     IdempotencyRepository,
     OutboxRepository,
     UnitOfWork,
 )
-from ...models import AuditLog, Loan, PaymentEvent, Repayment, PaymentStatus, Overpayment, ReconciliationIssue
-from ...ports.repositories import OverpaymentRepository
+from app.adapters.persistence.sqlalchemy_backend.models import AuditLog, Loan, PaymentEvent, Repayment, PaymentStatus, Overpayment, ReconciliationIssue, OutboxEvent
+from app.ports.repositories import OverpaymentRepository
 
 
 class SQLAlchemyLoanRepository(LoanRepository):
@@ -269,6 +270,25 @@ class SQLAlchemyPaymentEventRepository(PaymentEventRepository):
             actor="system",
             detail=reason,
         ))
+        notification_type = {
+            EventKind.transaction_reversal: "payment.reversed.v1",
+            EventKind.transaction_refund: "overpayment.refunded.v1",
+        }.get(EventKind(event.event_kind), "payment.reconciled.v1")
+        self.session.add(OutboxEvent(
+            event_type=notification_type,
+            payload=json.dumps({
+                "event_id": str(event.id), "event_reference": event.external_ref,
+                "original_payment_reference": event.original_payment_reference,
+                "provider": event.provider, "merchant_scope": event.merchant_scope,
+                "event_kind": event.event_kind, "loan_id": str(loan_id) if loan_id else None,
+                "gross_amount": str(event.amount),
+                "applied_amount": str(applied_amount), "overpaid_amount": str(overpaid_amount),
+                "outcome": status.value, "reason": reason,
+            }, sort_keys=True),
+            correlation_id="reconciliation-" + str(event.id),
+            idempotency_key=f"notification:{event.id}", status="pending",
+            available_at=datetime.now(timezone.utc),
+        ))
         if status == ReconciliationStatus.rejected:
             self.session.add(ReconciliationIssue(
                 issue_type="reconciliation_rejection",
@@ -393,21 +413,43 @@ class SQLAlchemyOutboxRepository(OutboxRepository):
         event_type: str,
         payload: dict,
         correlation_id: str,
+        idempotency_key: Optional[str] = None,
     ) -> int:
-        """Record an outgoing event."""
-        # TODO: Implement with a real outbox table
-        # For demo, just log it
-        print(f"[OUTBOX] {event_type}: {payload}")
-        return 0
+        """Persist an outgoing command in the caller's financial transaction."""
+        if idempotency_key:
+            existing = self.session.query(OutboxEvent).filter(
+                OutboxEvent.idempotency_key == idempotency_key
+            ).first()
+            if existing:
+                return existing.id
+        event = OutboxEvent(
+            event_type=event_type,
+            payload=json.dumps(payload, sort_keys=True, default=str),
+            correlation_id=correlation_id,
+            idempotency_key=idempotency_key,
+            status="pending",
+            available_at=datetime.now(timezone.utc),
+        )
+        self.session.add(event)
+        self.session.flush()
+        return event.id
     
     def list_unpublished_events(self, limit: int = 100) -> List[dict]:
-        """Fetch unpublished outbox events."""
-        # For demo, return empty
-        return []
+        events = self.session.query(OutboxEvent).filter(
+            OutboxEvent.status == "pending"
+        ).order_by(OutboxEvent.available_at, OutboxEvent.created_at).limit(limit).all()
+        return [{"id": e.id, "event_type": e.event_type, "payload": json.loads(e.payload),
+                 "correlation_id": e.correlation_id, "attempts": e.attempts} for e in events]
     
     def mark_event_published(self, outbox_id: int) -> None:
         """Mark an event as published."""
-        pass
+        event = self.session.get(OutboxEvent, outbox_id)
+        if not event:
+            raise ValueError(f"Outbox event {outbox_id} not found")
+        event.status = "published"
+        event.published_at = datetime.now(timezone.utc)
+        event.lease_expires_at = None
+        event.leased_by = None
 
 
 class SQLAlchemyUnitOfWork(UnitOfWork):

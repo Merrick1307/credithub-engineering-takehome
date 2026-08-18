@@ -11,7 +11,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # Install Python dependencies in a small, reproducible runtime image.
-FROM python:3.11-slim AS api
+FROM python:3.13-slim AS api
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app

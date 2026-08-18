@@ -467,7 +467,9 @@ const providerName = {
 };
 
 const eventKind = {
-  "transaction.credit": "Credit received",
+  "transaction.credit": "Payment received",
+  "transaction.reversal": "Payment Reversal",
+  "transaction.refund": "Overpayment Refund",
 };
 
 const pageDescriptions = {
