@@ -467,6 +467,12 @@ class SQLAlchemyUnitOfWork(UnitOfWork):
     
     def __enter__(self):
         self.session = self.session_factory()
+        # SQLite ignores SELECT ... FOR UPDATE, so a deferred transaction lets
+        # concurrent reconciliations read the same loan balance and overwrite
+        # each other. We would reserve SQLite's single writer before the first read;
+        # PostgreSQL continues to use the existing row-level locking design.
+        if self.session.get_bind().dialect.name == "sqlite":
+            self.session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
